@@ -74,9 +74,10 @@ fi
 # and an optional version/suffix. First arg overrides the path.
 SETUP="${1:-}"
 if [ -z "$SETUP" ]; then
-  SETUP=$(ls "$REPO_DIR"/installers/Creative_Cloud_Set-Up*.exe \
-             "$REPO_DIR"/installers/"Creative Cloud Set-Up"*.exe \
-             "$REPO_DIR"/installers/Creative_Cloud_Set*.exe 2>/dev/null | head -n1 || true)
+  SETUP=$(ls "$REPO_DIR"/resources/installers/Creative_Cloud_Set-Up*.exe \
+             "$REPO_DIR"/resources/installers/"Creative Cloud Set-Up"*.exe \
+             "$REPO_DIR"/resources/installers/Creative_Cloud_Set-Up.exe \
+             "$REPO_DIR"/resources/installers/Creative_Cloud_Set*.exe 2>/dev/null | head -n1 || true)
 fi
 if [ -z "$SETUP" ] || [ ! -f "$SETUP" ]; then
   echo "ERROR: online bootstrapper not found."

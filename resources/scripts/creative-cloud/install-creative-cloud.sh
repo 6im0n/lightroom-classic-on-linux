@@ -83,7 +83,7 @@ fi
 # ---------------------------------------------------------------------------
 # 1. Unzip the offline CC installer
 # ---------------------------------------------------------------------------
-ZIP=$(ls "$REPO_DIR"/installers/ACCCx*.zip 2>/dev/null | head -n1 || true)
+ZIP=$(ls "$REPO_DIR"/resources/installers/ACCCx*.zip 2>/dev/null | head -n1 || true)
 if [ -z "$ZIP" ]; then
   echo "ERROR: no resources/installers/ACCCx*.zip found."
   echo "Download it from https://creativecloud.adobe.com/apps/download/creative-cloud"
