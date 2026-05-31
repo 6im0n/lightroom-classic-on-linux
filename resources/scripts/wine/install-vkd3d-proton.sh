@@ -27,9 +27,9 @@ fi
 install_from_dir() {
   local src="$1"
   for d in d3d12.dll d3d12core.dll; do
-    if [ -f "$resources/$d" ]; then
+    if [ -f "$src/$d" ]; then
       [ -f "$SYS32/$d" ] && [ ! -f "$SYS32/$d.wine-builtin-bak" ] && cp -n "$SYS32/$d" "$SYS32/$d.wine-builtin-bak"
-      cp -v "$resources/$d" "$SYS32/$d"
+      cp -v "$src/$d" "$SYS32/$d"
     fi
   done
 }
