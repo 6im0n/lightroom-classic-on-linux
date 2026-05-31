@@ -4,6 +4,8 @@
 manual edits, and GPU acceleration all work. AI Masking does not (see
 [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md)).
 
+![Screenshot](https://github.com/6im0n/lightroom-classic-on-linux/blob/main/resources/ScreenShot/ScreenShot_9.png)
+
 This repo installs and runs **Adobe Lightroom Classic** (the local-catalog
 desktop photo app — NOT Lightroom CC / "Lightroom Desktop") on Linux with Wine.
 Run **`./start.sh`** for a guided menu, or call the `scripts/` by hand. You can
