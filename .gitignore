@@ -1,0 +1,29 @@
+# Wine prefi
+wineprefix/
+*.wineprefix
+
+# Logs and temp files
+*.log
+logs/
+*.tmp
+*.swp
+*.swo
+
+# Adobe / installer binaries — the whole tree is user-supplied Adobe property
+# (multi-GB Set-up.exe + products/ packages/ resources/, ACCCx*.zip, gecko,
+# WebView2, Creative_Cloud_Set-Up.exe). Never committed; keep the dir via .gitkeep.
+resources/installers/*
+!resources/installers/.gitkeep
+
+# Loose DLLs
+resources/stubs/*.dll
+resources/stubs/*.exe
+
+# Editor / OS noise
+__pycache__/
+*.pyc
+.DS_Store
+.idea/
+.vscode/
+*.bak
+*~
