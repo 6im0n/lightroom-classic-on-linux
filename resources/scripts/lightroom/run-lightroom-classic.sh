@@ -117,7 +117,32 @@ fi
 
 LR_EXE="C:\\Program Files\\Adobe\\Adobe Lightroom Classic\\Lightroom.exe"
 
+# ---------------------------------------------------------------------------
+# AI masking (Select Subject / Sky / Objects).
+#
+# Enabled by install-ai-masking.sh, which builds stubs/binaries/fakeram.so and
+# registers our WinRT stream classes. onnxruntime sizes its CPU inference arena
+# to TOTAL RAM; on a 16 GB box it would try to grab everything and OOM/freeze.
+# fakeram.so (LD_PRELOAD) caps the RAM wine reports so the arena is bounded.
+#
+# LR_MASKING = auto (default) | off
+#   auto: load fakeram.so if present (masking installed); else no preload.
+#   off:  never preload (masking will OOM-risk on low-RAM boxes).
+# FAKERAM_GB: RAM cap (GB) reported to wine. Default ~60% of real RAM (leaves
+#   headroom for LR + the desktop), floor 6. Override to taste.
+# ---------------------------------------------------------------------------
+LR_MASKING="${LR_MASKING:-auto}"
+FAKERAM_SO="$REPO_DIR/stubs/binaries/fakeram.so"
 export LD_PRELOAD=
+if [ "$LR_MASKING" != off ] && [ -f "$FAKERAM_SO" ]; then
+  if [ -z "${FAKERAM_GB:-}" ]; then
+    _totkb=$(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null)
+    FAKERAM_GB=$(awk -v k="${_totkb:-0}" 'BEGIN{g=int(k/1024/1024*0.6); if(g<6)g=6; print g}')
+  fi
+  export LD_PRELOAD="$FAKERAM_SO" FAKERAM_GB
+  echo "==> AI masking: fakeram.so loaded (RAM reported to wine capped at ${FAKERAM_GB}GB)"
+fi
+
 export DXVK_CONFIG_FILE="$PREFIX/dxvk.conf"
 export WINEPREFIX="$PREFIX"
 export WINEARCH=win64
