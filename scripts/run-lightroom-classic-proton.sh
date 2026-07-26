@@ -17,14 +17,17 @@ LR='C:\Program Files\Adobe\Adobe Lightroom Classic\Lightroom.exe'
 LR_DPI="${LR_DPI:-144}"
 uwine reg add 'HKCU\Control Panel\Desktop' /v LogPixels /t REG_DWORD /d "$LR_DPI" /f >/dev/null 2>&1 || true
 
-# PROTON_DESKTOP=WxH runs inside a wine virtual desktop. Use it if the mouse
+# PROTON_DESKTOP=WxH runs inside a wine virtual desktop. On GNOME/Wayland this
+# is enabled automatically unless PROTON_DESKTOP=off is set. Use it if the mouse
 # cursor is vertically offset (Xwayland + Mutter HiDPI scaling): in a virtual
 # desktop wine draws its own cursor, so the offset goes away. e.g.
 #   PROTON_DESKTOP=2304x1296 scripts/run-lightroom-classic-proton.sh
 echo "==> [proton] launching Lightroom Classic"
 # Note: can't `exec` urun — it's a shell function, not a binary.
-if [ -n "${PROTON_DESKTOP:-}" ]; then
-  urun wine explorer /desktop="lr,$PROTON_DESKTOP" "$LR" "$@"
+DESKTOP_SIZE=$(proton_desktop_size || true)
+if [ -n "$DESKTOP_SIZE" ]; then
+  echo "    Using Wine virtual desktop: $DESKTOP_SIZE"
+  uwine explorer /desktop="lr,$DESKTOP_SIZE" "$LR" "$@"
 else
-  urun wine "$LR" "$@"
+  urun "$(proton_win_path_to_unix "$LR")" "$@"
 fi

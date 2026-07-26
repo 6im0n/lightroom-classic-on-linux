@@ -41,21 +41,43 @@ else
 fi
 
 # 2. Microsoft Edge WebView2 (Adobe installer engine needs it).
+PFX_DRIVE_C=$(find "$PFX" -maxdepth 3 -type d -name drive_c -print -quit 2>/dev/null || true)
 WV2="$INST_DIR/MicrosoftEdgeWebview2Setup.exe"
-if [ ! -f "$WV2" ]; then
-  echo "==> Downloading MicrosoftEdgeWebview2Setup.exe"
-  curl -L -o "$WV2" "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+if [ -n "$PFX_DRIVE_C" ] && [ -d "$PFX_DRIVE_C/Program Files (x86)/Microsoft/EdgeWebView" ]; then
+  echo "==> [proton] WebView2 already installed"
+else
+  if [ ! -f "$WV2" ]; then
+    echo "==> Downloading MicrosoftEdgeWebview2Setup.exe"
+    curl -L -o "$WV2" "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+  fi
+  echo "==> [proton] Installing WebView2 runtime"
+  urun "$WV2" /silent /install || true
 fi
-echo "==> [proton] Installing WebView2 runtime"
-urun "$WV2" /silent /install || true
 
 # 3. Windows version for the install (win10 = passes OS check, no Mica flicker).
 pset_winver "${PROTON_WINVER:-win10}"
+pset_x11_window_mode
 
 # 4. Launch the CC installer.
 echo "==> [proton] Launching Adobe Creative Cloud installer"
 echo "    Sign in with your Adobe ID; then Apps panel > Install Lightroom Classic."
-urun "$SETUP" || true
+# PROTON_DESKTOP=WxH runs inside a Wine virtual desktop. On GNOME/Wayland this
+# is enabled automatically unless PROTON_DESKTOP=off is set. It avoids the raw
+# Xwayland/Proton window path that can show no normal GNOME titlebar and can
+# vertically offset the mouse cursor under Mutter HiDPI scaling. e.g.
+#   PROTON_DESKTOP=2304x1296 scripts/install-creative-cloud-proton.sh
+DESKTOP_SIZE=$(proton_desktop_size || true)
+if [ -n "$DESKTOP_SIZE" ]; then
+  DESKTOP_NAME="${PROTON_INSTALL_DESKTOP_NAME:-cc-installer}"
+  echo "    Using Wine virtual desktop: $DESKTOP_SIZE"
+  echo "    Placing window at ${PROTON_WINDOW_X:-80},${PROTON_WINDOW_Y:-120}"
+  uwine explorer /desktop="$DESKTOP_NAME,$DESKTOP_SIZE" "$(proton_unix_path_to_z "$SETUP")" &
+  INSTALLER_PID=$!
+  proton_position_window "$DESKTOP_NAME"
+  wait "$INSTALLER_PID" || true
+else
+  urun "$SETUP" || true
+fi
 
 # 5. Post-install fixes: disable AdobeGrowthSDK + HDUWP (same wine-version issues).
 DRIVE_C=$(find "$PFX" -maxdepth 3 -type d -name drive_c 2>/dev/null | head -n1)
