@@ -1,8 +1,8 @@
 diff --git a/dlls/d2d1/d2d1_private.h b/dlls/d2d1/d2d1_private.h
-index 9c78aaf..7b9a4db 100644
+index 9c78aaf..190b370 100644
 --- a/dlls/d2d1/d2d1_private.h
 +++ b/dlls/d2d1/d2d1_private.h
-@@ -221,6 +221,23 @@ struct d2d_device_context
+@@ -221,6 +221,24 @@ struct d2d_device_context
      struct d2d_clip_stack clip_stack;
  
      struct d2d_indexed_objects vertex_buffers;
@@ -21,13 +21,14 @@ index 9c78aaf..7b9a4db 100644
 +    {
 +        ID2D1Geometry *mask;      /* held ref while pushed; NULL = no geometric mask */
 +        D2D1_MATRIX_3X2_F mask_transform;
++        D2D1_MATRIX_3X2_F world_transform;  /* world transform captured at PushLayer */
 +    } *layers;
 +    size_t layers_size, layers_count;
  };
  
  HRESULT d2d_d3d_create_render_target(struct d2d_device *device, IDXGISurface *surface, IUnknown *outer_unknown,
 diff --git a/dlls/d2d1/device.c b/dlls/d2d1/device.c
-index b3560f0..698cfdb 100644
+index b3560f0..0420c8d 100644
 --- a/dlls/d2d1/device.c
 +++ b/dlls/d2d1/device.c
 @@ -116,6 +116,137 @@ static void d2d_clip_stack_pop(struct d2d_clip_stack *stack)
@@ -222,7 +223,7 @@ index b3560f0..698cfdb 100644
          d2d_clip_stack_cleanup(&context->clip_stack);
          IDWriteRenderingParams_Release(context->default_text_rendering_params);
          if (context->text_rendering_params)
-@@ -1830,31 +1997,106 @@ static void STDMETHODCALLTYPE d2d_device_context_GetTags(ID2D1DeviceContext6 *if
+@@ -1830,31 +1997,119 @@ static void STDMETHODCALLTYPE d2d_device_context_GetTags(ID2D1DeviceContext6 *if
      *tag2 = render_target->drawing_state.tag2;
  }
  
@@ -232,19 +233,29 @@ index b3560f0..698cfdb 100644
 + * mode 1 writes (INCR) the mask area at the new level; mode 2 erases (DECR)
 + * it when the layer is popped. Colour writes are off (see the draw path). */
 +static void d2d_device_context_rasterise_mask(struct d2d_device_context *context,
-+        const struct d2d_geometry *mask, const D2D1_MATRIX_3X2_F *transform, unsigned int mode)
++        const struct d2d_geometry *mask, const D2D1_MATRIX_3X2_F *mask_transform,
++        const D2D1_MATRIX_3X2_F *world_transform, unsigned int mode)
  {
 -    struct d2d_device_context *context = impl_from_ID2D1DeviceContext(iface);
 +    D2D1_MATRIX_3X2_F previous_transform = context->drawing_state.transform;
++    D2D1_MATRIX_3X2_F transform = *mask_transform;
 +
-+    context->drawing_state.transform = *transform;
++    /* The mask is expressed in the layer's own space: it is transformed by
++     * maskTransform *and* by the world transform that was in effect when the
++     * layer was pushed. Using maskTransform alone drops the mask of every
++     * layer pushed under a non-identity transform (HiDPI scale, per-cell grid
++     * offsets), so the stencil test then rejects the whole layer content —
++     * that is what blanked the Library and Import thumbnail grids. */
++    d2d_matrix_multiply(&transform, world_transform);
+ 
+-    FIXME("iface %p, layer_parameters %p, layer %p stub!\n", iface, layer_parameters, layer);
++    context->drawing_state.transform = transform;
 +    context->stencil_mode = mode;
 +    d2d_device_context_fill_geometry(context, mask, NULL, NULL);
 +    context->stencil_mode = 0;
 +    context->drawing_state.transform = previous_transform;
 +}
- 
--    FIXME("iface %p, layer_parameters %p, layer %p stub!\n", iface, layer_parameters, layer);
++
 +static void d2d_device_context_push_layer(struct d2d_device_context *context,
 +        const D2D1_LAYER_PARAMETERS1 *layer_parameters)
 +{
@@ -280,6 +291,9 @@ index b3560f0..698cfdb 100644
 +    {
 +        entry->mask = layer_parameters->geometricMask;
 +        entry->mask_transform = layer_parameters->maskTransform;
++        /* Snapshot the world transform: PopLayer must erase the same pixels
++         * this push wrote, even if the app changed the transform meanwhile. */
++        entry->world_transform = context->drawing_state.transform;
 +        ID2D1Geometry_AddRef(entry->mask);
 +
 +        if (context->stencil_ref == 0)
@@ -290,7 +304,7 @@ index b3560f0..698cfdb 100644
 +            ID3D11DeviceContext_Release(d3d_context);
 +        }
 +        ++context->stencil_ref;
-+        d2d_device_context_rasterise_mask(context, mask_impl, &entry->mask_transform, 1);
++        d2d_device_context_rasterise_mask(context, mask_impl, &entry->mask_transform, &entry->world_transform, 1);
      }
  }
  
@@ -330,7 +344,7 @@ index b3560f0..698cfdb 100644
 +        const struct d2d_geometry *mask_impl = unsafe_impl_from_ID2D1Geometry(entry->mask);
 +
 +        if (mask_impl && context->stencil_ref)
-+            d2d_device_context_rasterise_mask(context, mask_impl, &entry->mask_transform, 2);
++            d2d_device_context_rasterise_mask(context, mask_impl, &entry->mask_transform, &entry->world_transform, 2);
 +        if (context->stencil_ref)
 +            --context->stencil_ref;
 +        ID2D1Geometry_Release(entry->mask);
@@ -338,7 +352,7 @@ index b3560f0..698cfdb 100644
  }
  
  static HRESULT STDMETHODCALLTYPE d2d_device_context_Flush(ID2D1DeviceContext6 *iface, D2D1_TAG *tag1, D2D1_TAG *tag2)
-@@ -2554,6 +2796,10 @@ static void d2d_device_context_reset_target(struct d2d_device_context *context)
+@@ -2554,6 +2809,10 @@ static void d2d_device_context_reset_target(struct d2d_device_context *context)
      if (context->bs)
          ID3D11BlendState_Release(context->bs);
      context->bs = NULL;
@@ -349,7 +363,7 @@ index b3560f0..698cfdb 100644
  }
  
  static void STDMETHODCALLTYPE d2d_device_context_SetTarget(ID2D1DeviceContext6 *iface, ID2D1Image *target)
-@@ -2798,10 +3044,8 @@ static void STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_PushLayer(ID
+@@ -2798,10 +3057,8 @@ static void STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_PushLayer(ID
  {
      struct d2d_device_context *context = impl_from_ID2D1DeviceContext(iface);
  
