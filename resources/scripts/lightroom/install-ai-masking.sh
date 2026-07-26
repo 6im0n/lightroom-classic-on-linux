@@ -70,6 +70,12 @@ fi
 echo "    built -> stubs/binaries/fakeram.so"
 
 # --- 3. register the three WinRT runtimeclasses -> our DLL --------------------
+# NOTE: these entries do not survive a wine upgrade. The prefix update that runs
+# after one rewrites HKLM\...\WindowsRuntime\ActivatableClassId and points
+# DataWriter / RandomAccessStreamReference back at wine's own builtins (wine
+# 11.12 ships both in wintypes.dll / windows.storage.dll), which leaves WinML on
+# a mixed stack. run-lightroom-classic.sh re-asserts them at launch; re-running
+# this script fixes them too.
 echo "==> Registering WinRT ActivatableClassId entries"
 reg_class() {
   WINEPREFIX="$PREFIX" WINEDEBUG=-all "$WINE" reg add \

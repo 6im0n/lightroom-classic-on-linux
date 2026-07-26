@@ -98,12 +98,32 @@ fi
 # ---------------------------------------------------------------------------
 # Import-module crash fix (default) + virtual-desktop fallback.
 #
-# On a Wayland session (Xwayland), some tips can crash the session
-# with an Xlib abort:
+# Opening the Import window aborts the whole process with an Xlib error:
 #   X Error of failed request:  BadMatch (invalid parameter attributes)
 #   Major opcode of failed request:  62 (X_CopyArea)
-# default; override with WINE_X11_NO_MITSHM=0.
-export WINE_X11_NO_MITSHM="${WINE_X11_NO_MITSHM:-0}"
+#
+# Cause: on a Wayland session (Xwayland) the X server advertises a depth-24
+# default visual *and* a depth-32 ARGB visual (wine logs "init_visuals default
+# visual 23 class 4 argb 7c"). Wine composites parts of the UI through the ARGB
+# visual, and X_CopyArea between drawables of different depth is a protocol
+# error — which Xlib turns into an abort, killing Lightroom.
+#
+# Fix: pin wine's default visual to the depth-32 ARGB one, so every drawable
+# has the same depth and the copy is legal (winex11 "ScreenDepth", see
+# dlls/winex11.drv/x11drv_main.c). Written per-app so nothing else in the
+# prefix is affected. LR_SCREEN_DEPTH=0 skips the write and uses whatever the
+# prefix already has; 24 restores wine's default (and the crash).
+#
+# NOTE: WINE_X11_NO_MITSHM, which older revisions of this launcher exported,
+# does nothing — wine has never implemented that variable (it was only ever
+# requested, wine bug 43893), and there is no MIT-SHM string anywhere in the
+# wine 11.12 binaries. It was removed rather than kept as a placebo.
+LR_SCREEN_DEPTH="${LR_SCREEN_DEPTH:-32}"
+if [ "$LR_SCREEN_DEPTH" != 0 ]; then
+  WINEPREFIX="$PREFIX" WINEDEBUG=-all "${WINE:-wine}" reg ADD \
+    'HKCU\Software\Wine\AppDefaults\Lightroom.exe\X11 Driver' \
+    /v ScreenDepth /t REG_SZ /d "$LR_SCREEN_DEPTH" /f >/dev/null 2>&1 || true
+fi
 
 # Fallback only: if the MIT-SHM fix isn't enough on your setup, --vdesktop runs
 # Lightroom inside a wine virtual desktop (one root window wine owns, so there's
@@ -142,6 +162,39 @@ if [ "$LR_MASKING" != off ] && [ -f "$FAKERAM_SO" ]; then
   export LD_PRELOAD="$FAKERAM_SO" FAKERAM_GB
   echo "==> AI masking: fakeram.so loaded (RAM reported to wine capped at ${FAKERAM_GB}GB)"
 fi
+
+# ---------------------------------------------------------------------------
+# Keep the WinRT stream classes pointed at our implementation.
+#
+# install-ai-masking.sh registers three Windows.Storage.Streams runtimeclasses
+# against winrt_inmemstream.dll. A wine UPGRADE re-runs the prefix update, which
+# rewrites HKLM\...\WindowsRuntime\ActivatableClassId wholesale and hands
+# DataWriter / RandomAccessStreamReference back to wine's own builtins (wine
+# 11.12 ships both), leaving WinML on a mixed stack. Re-assert ours whenever
+# fewer than three entries still name our DLL. No-op if masking isn't installed.
+# ---------------------------------------------------------------------------
+WINRT_DLL="$PREFIX/drive_c/windows/system32/winrt_inmemstream.dll"
+WINRT_REGISTERED=$(grep -c 'winrt_inmemstream\.dll' "$PREFIX/system.reg" 2>/dev/null || true)
+if [ -f "$WINRT_DLL" ] && [ "${WINRT_REGISTERED:-0}" -lt 3 ]; then
+  echo "==> Re-registering WinRT stream classes (a wine upgrade reset them)"
+  for _cls in InMemoryRandomAccessStream DataWriter RandomAccessStreamReference; do
+    WINEPREFIX="$PREFIX" WINEDEBUG=-all "${WINE:-wine}" reg add \
+      "HKLM\\Software\\Microsoft\\WindowsRuntime\\ActivatableClassId\\Windows.Storage.Streams.$_cls" \
+      /v DllPath /t REG_SZ /d 'C:\windows\system32\winrt_inmemstream.dll' /f >/dev/null 2>&1 || true
+  done
+fi
+
+# The proxy version.dll (dialog-repaint fix) forwards to version_orig.dll, a
+# copy of wine's builtin taken at install time. After a wine upgrade that copy
+# is stale: warn so the fixes script can be re-run to refresh it.
+_lr_dir="$PREFIX/drive_c/Program Files/Adobe/Adobe Lightroom Classic"
+for _b in /usr/lib/wine/x86_64-windows/version.dll \
+          "$(dirname "$(command -v "${WINE:-wine}" 2>/dev/null || echo /usr/bin/wine)")/../lib/wine/x86_64-windows/version.dll"; do
+  [ -f "$_lr_dir/version_orig.dll" ] && [ -f "$_b" ] || continue
+  cmp -s "$_lr_dir/version_orig.dll" "$_b" || echo \
+    "==> note: version_orig.dll predates the installed wine — re-run install-lightroom-classic-fixes.sh"
+  break
+done
 
 export DXVK_CONFIG_FILE="$PREFIX/dxvk.conf"
 export WINEPREFIX="$PREFIX"
