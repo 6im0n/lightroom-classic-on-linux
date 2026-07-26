@@ -50,6 +50,23 @@ build() {
 # empty firewall-rules enumerator so the probe succeeds cleanly.
 build hnetcfg.c         "hnetcfg-stub.dll"                 "-lkernel32 -lole32 -luuid -ladvapi32 -loleaut32"
 
+# version-proxy: fixes dialog "ghosting"/blank panels (Export preset tree,
+# Copy Settings) — a proxy version.dll that forwards version's 16 exports to
+# version_orig.dll (a copy of wine's builtin) and installs a coalesced repaint
+# hook on Lightroom's UI thread; full story in fix_ghost.c.
+# install-lightroom-classic-fixes.sh installs it into Lightroom's app dir,
+# scoped to Lightroom.exe via a per-app DllOverride (32-bit helpers unaffected).
+# Built WITHOUT -nostartfiles: the CRT entry must run so DllMain installs the hook.
+PROXY_SRC="$SRC_DIR/fix_ghost.c"
+PROXY_DEF="$SRC_DIR/version-proxy.def"
+PROXY_OUT="$OUT_DIR/version-proxy.dll"
+if [ -f "$PROXY_OUT" ] && [ "$PROXY_OUT" -nt "$PROXY_SRC" ] && [ "$PROXY_OUT" -nt "$PROXY_DEF" ]; then
+  echo "==> version-proxy.dll is up to date"
+else
+  echo "==> Building version-proxy.dll from fix_ghost.c + version-proxy.def"
+  $CC -shared -Wl,--kill-at -O2 -s -o "$PROXY_OUT" "$PROXY_SRC" "$PROXY_DEF" -luser32 -lgdi32
+fi
+
 echo
 echo "==> build-stubs.sh done. Binaries in $OUT_DIR"
 ls -la "$OUT_DIR"
