@@ -140,10 +140,28 @@ listed here so you know what they are if you turn logging back on:
 ## 5. wine missing export: `KERNEL32.dll.UnregisterApplicationRecoveryCallback`
 
 Wine ships `RegisterApplicationRecoveryCallback` and
-`ApplicationRecoveryFinished` but not `UnregisterApplicationRecoveryCallback`.
-If LrC hits it, the process can abort on teardown. In practice this is mainly
-seen *after* a crashed native-Wayland attempt (`LR_DRIVER=wayland`), which can
-leave a stale wineserver in mixed driver state. Clear it before relaunching:
+`ApplicationRecoveryFinished` but not `UnregisterApplicationRecoveryCallback` —
+and `Lightroom.exe` imports all three. Wine fills the missing import with an
+aborting stub, so **closing Lightroom kills the thread mid-shutdown**:
+
+```
+wine: Call from ... to unimplemented function
+      KERNEL32.dll.UnregisterApplicationRecoveryCallback, aborting
+```
+
+The window vanishes but the process stays alive holding its locks, and the next
+launch deadlocks against it with
+`err:sync:RtlpWaitForCriticalSection ... wait timed out`. Adobe's background
+services (Adobe Desktop Service, AdobeIPCBroker, CoreSync) linger the same way,
+as does a crashed native-Wayland attempt (`LR_DRIVER=wayland`).
+
+**Handled automatically:** `run-lightroom-classic.sh` runs `wineserver -k` for
+the prefix before every launch and waits for the processes to be reaped. Only
+running processes are affected — the install, settings and shader cache on disk
+are untouched, and Lightroom is single-instance anyway. Set `LR_KILL_STALE=0` to
+skip it (e.g. to attach a debugger to a running instance).
+
+By hand, or for the Creative Cloud app (`start.sh` option `k`):
 
 ```bash
 WINEPREFIX=$PWD/wineprefix wineserver -k

@@ -31,6 +31,43 @@ for _a in "$@"; do
 done
 set -- "${_args[@]+"${_args[@]}"}"
 
+# ---------------------------------------------------------------------------
+# Clear the wine session before every launch.
+#
+# Lightroom.exe statically imports KERNEL32.UnregisterApplicationRecoveryCallback,
+# which wine does not export. Wine wires an aborting stub into that import slot,
+# so closing Lightroom kills the thread mid-shutdown:
+#
+#   wine: Call from ... to unimplemented function
+#         KERNEL32.dll.UnregisterApplicationRecoveryCallback, aborting
+#
+# The window disappears but the process stays alive holding its locks, and the
+# next launch then deadlocks against it:
+#
+#   err:sync:RtlpWaitForCriticalSection ... wait timed out in thread ..., blocked by ...
+#
+# Adobe's background services (Adobe Desktop Service, AdobeIPCBroker, CoreSync)
+# linger the same way. So kill the prefix's wine session first — nothing on disk
+# is touched, only running processes. Lightroom is single-instance anyway: a
+# second copy deadlocks rather than opening a window.
+#
+# LR_KILL_STALE=0 skips this (e.g. to attach a debugger to a running instance).
+# ---------------------------------------------------------------------------
+LR_KILL_STALE="${LR_KILL_STALE:-1}"
+if [ "$LR_KILL_STALE" != 0 ]; then
+  if pgrep -f 'Lightroom\.exe' >/dev/null 2>&1; then
+    echo "==> clearing the previous wine session (stale Lightroom teardown)"
+  fi
+  WINEPREFIX="$REPO_DIR/wineprefix" wineserver -k >/dev/null 2>&1 || true
+  # wineserver -k returns before the processes are reaped; wait for them so the
+  # new instance never races the old one's locks.
+  _n=0
+  while pgrep -f 'Lightroom\.exe' >/dev/null 2>&1 && [ "$_n" -lt 20 ]; do
+    sleep 0.25
+    _n=$((_n + 1))
+  done
+fi
+
 # HiDPI: wine renders at 96 DPI (100%) by default, which looks tiny on
 # high-density screens. Set LR_DPI to scale the whole UI:
 #   96 = 100%   120 = 125%   144 = 150%   168 = 175%   192 = 200%
