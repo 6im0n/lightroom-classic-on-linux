@@ -19,6 +19,9 @@
 #      Lightroom. The tip is non-essential — we empty its campaign dir and lock
 #      it read-only so the popup never renders (dunamis logs "feedback_show
 #      failed" and carries on).
+#   4. Disable wine's discburning DLL. Lightroom's Export dialog probes CD/DVD
+#      burners through it, and wine's implementation deadlocks the main UI
+#      thread -> Export window freezes. Disabling it makes the probe fail fast.
 #
 # KNOWN LIMITATION (not fixed here): Classic's AI object-detection / Remove
 # tool activates the WinRT runtimeclasses
@@ -80,6 +83,20 @@ for roaming in "$PREFIX"/drive_c/users/*/AppData/Roaming; do
   chmod -R a-w "$fb"                        # read-only: no campaign data, no tip
   echo "    locked read-only: ${fb#"$PREFIX/drive_c/"}"
 done
+
+
+# 4. Disable wine's discburning (IMAPI2 disc-burning) DLL. Lightroom's Export
+#    dialog has a "Burn to disc" destination; on open it enumerates CD/DVD
+#    burners through discburning, and wine's implementation blocks the main UI
+#    thread on a sync object that never signals -> the whole Export window (and
+#    app) freezes. We have no optical writer to burn to anyway, so disable the
+#    DLL: the probe then fails fast and Export opens normally.
+#    (Found via winedbg: main thread wait in discburning -> agkernel -> Export.)
+echo "==> Disabling discburning (fixes the Export-window freeze)"
+WINEPREFIX="$PREFIX" "${WINE:-wine}" reg add "HKCU\\Software\\Wine\\DllOverrides" \
+  /v discburning /t REG_SZ /d "" /f >/dev/null 2>&1 \
+  && echo "    HKCU\\Software\\Wine\\DllOverrides\\discburning = \"\" (disabled)" \
+  || echo "    WARNING: could not write discburning override (run wine prefix setup first)"
 
 echo
 echo "==> install-lightroom-classic-fixes.sh done."
