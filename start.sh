@@ -142,6 +142,7 @@ while true; do
   printf "   8) Run Lightroom Classic ${DIM}— virtual desktop (fallback if something crashes)${Z}\n"
   printf "   9) Run Creative Cloud app          ${DIM}(Win10)${Z}%b\n"  "$(mark runcc)"
   printf "   d) Lightroom UI scale ${DIM}[current: %s]${Z}\n"   "$_dpilbl"
+  printf "   g) Add to application menu ${DIM}(desktop launcher)${Z}\n"
   echo
   echo "${DIM}  --------------- Other ------------------${Z}"
   printf '  10) Set Windows version manually (win7/win10/win11)\n'
@@ -207,6 +208,38 @@ while true; do
            LR_DPI_SET="$_newdpi"
            echo "  ${G}UI scale: $(dpi_pct "$LR_DPI_SET")% (${LR_DPI_SET} dpi) — applies to runs 7 and 8.${Z}"
            sleep 1.2
+         fi ;;
+    g|G) if [ "$LR_INSTALLED" = 0 ]; then
+           echo "  ${Y}Lightroom Classic is not installed yet.${Z}"; sleep 1.5
+         else
+           echo; echo "${C}${TRI} Add Lightroom Classic to the application menu${Z}"; echo
+           echo "  ${DIM}Creates a desktop launcher that starts Lightroom through${Z}"
+           echo "  ${DIM}run-lightroom-classic.sh (with all fixes), replacing wine's${Z}"
+           echo "  ${DIM}broken auto-generated entry.${Z}"; echo
+           # 1) UI scale / DPI
+           echo "  ${B}UI scale${Z} ${DIM}(96 dpi = 100%):${Z}"
+           echo "    1) 100%  (96 dpi)"
+           echo "    2) 125%  (120 dpi)"
+           echo "    3) 150%  (144 dpi)  ${DIM}default${Z}"
+           echo "    4) 175%  (168 dpi)"
+           echo "    5) 200%  (192 dpi)"
+           echo "    6) 250%  (240 dpi)"
+           echo "    7) 300%  (288 dpi)"
+           printf '  choose [1-7, a raw dpi like 216, or Enter for default]: '; read -r d
+           _gdpi=""
+           case "$d" in
+             1) _gdpi=96 ;;  2) _gdpi=120 ;; 3) _gdpi=144 ;; 4) _gdpi=168 ;;
+             5) _gdpi=192 ;; 6) _gdpi=240 ;; 7) _gdpi=288 ;;
+             '') _gdpi="" ;;
+             *[!0-9]*) echo "  ${Y}invalid — using default${Z}"; _gdpi="" ;;
+             *) if [ "$d" -ge 96 ]; then _gdpi="$d"; else echo "  ${Y}minimum is 96 — using default${Z}"; _gdpi=""; fi ;;
+           esac
+           # 2) virtual desktop on/off
+           echo
+           printf "  ${B}Virtual desktop?${Z} ${DIM}(crash fallback; off unless something crashes)${Z} [y/N]: "; read -r vd
+           _gvd=""
+           case "$vd" in y|Y|yes|YES) _gvd="--vdesktop" ;; esac
+           run "$S/lightroom/install-desktop-entry.sh" ${_gdpi:+--dpi=$_gdpi} $_gvd
          fi ;;
     r|R) run "$S/wine/reset-wineprefix.sh" ;;
     q|Q|"") echo "bye."; exit 0 ;;

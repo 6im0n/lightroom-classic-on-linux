@@ -22,7 +22,7 @@ Tested combination:
 | Component       | Version / detail                                   |
 |-----------------|----------------------------------------------------|
 | Host OS         | Arch Linux, GNOME (Wayland session)                |
-| Wine            | 11.9 (Staging)                                     |
+| Wine            | 11.10 (Staging) — also tested on 11.9              |
 | Winetricks      | recent (20240105+)                                 |
 | DXVK            | 2.7.1 (installed via winetricks)                   |
 | Wine Gecko      | 2.47.4 (both x86 and x86_64)                        |
@@ -62,6 +62,7 @@ running them in the right order.
   --- run ---
   7) Run Lightroom Classic                          → resources/scripts/lightroom/run-lightroom-classic.sh (§8)
   8) Run Creative Cloud app                         → resources/scripts/creative-cloud/run-creative-cloud.sh
+  g) Add to application menu                        → resources/scripts/lightroom/install-desktop-entry.sh (§8)
   --- other ---
   9) Set Windows version (win7/win10/win11)         → resources/scripts/wine/set-winver.sh
   k) Kill the wine session (wineserver -k)          → if an app hangs/won't relaunch
@@ -148,13 +149,13 @@ in section 7.
 Follow WineHQ's per-distro instructions: <https://wiki.winehq.org/Download>
 
 You want `winehq-staging` (Ubuntu/Debian) or `wine-staging` (Fedora/Arch),
-version **11.8 or newer** (we run 11.9).
+version **11.8 or newer** (we run 11.10; also tested on 11.9).
 
 Verify:
 
 ```bash
 wine --version
-# expected: wine-11.9 (Staging)   (or higher)
+# expected: wine-11.10 (Staging)   (or higher)
 ```
 
 If you have a system `wine` already and want this install isolated, WineHQ also
@@ -477,20 +478,50 @@ The launcher is self-contained and configurable via env vars:
   for the DXVK/vkd3d device-info dumps and the harmless EDID/colorimetry lines.
   Override any of these by exporting your own value.
 
-Make a desktop launcher if you want it in your menu:
+### Add it to your application menu
 
-```ini
-[Desktop Entry]
-Name=Lightroom Classic (Wine)
-Exec=/path/to/lightroom-cc-on-linux/resources/scripts/lightroom/run-lightroom-classic.sh
-Icon=lightroom
-Type=Application
-Categories=Graphics;Photography;
+To launch Lightroom from your desktop's application menu (any environment —
+KDE, LXDE, XFCE, GNOME, …) instead of the terminal, use menu option **`g`**
+(*Add to application menu*) in `./start.sh`. It asks for the UI scale (DPI) and
+whether to use a virtual desktop, then installs a freedesktop `.desktop`
+launcher that runs through `run-lightroom-classic.sh` (so every fix applies).
+
+Or run the script directly:
+
+```bash
+./resources/scripts/lightroom/install-desktop-entry.sh --dpi=144   # optional: --vdesktop, --remove
 ```
+
+It writes `~/.local/share/applications/adobe-lightroom-classic.desktop`,
+harvests Lightroom's icons into the hicolor theme under a stable name, and
+removes wine's own auto-generated entry — that one calls `Lightroom.exe`
+**raw** (bypassing all our fixes) and hard-codes the prefix path it saw at
+install time, so it silently breaks if the repo ever moves.
+
+> wine's `winemenubuilder` may recreate its broken entry after a later wine
+> run; just re-run option `g` (or the script) to clean it up.
 
 ---
 
 ## 9. Troubleshooting
+
+### `wine client error:0: version mismatch` / nothing launches after a wine update
+
+```
+wine client error:0: version mismatch 935/943.
+Your wineserver binary was not upgraded correctly, ...
+```
+
+You upgraded wine while a `wineserver` from the **old** version was still
+running in this prefix. The old server keeps its old protocol number, so the
+new wine client refuses to attach — and every launch route (the application-menu
+launcher, the CLI, `start.sh` runs) dies instantly. Kill the stale server:
+
+```bash
+WINEPREFIX=$PWD/wineprefix wineserver -k     # or: start.sh option k
+```
+
+Then relaunch. (Tested across a 11.9 → 11.10 upgrade.)
 
 ### Installer aborts immediately / "System Requirements check failed"
 

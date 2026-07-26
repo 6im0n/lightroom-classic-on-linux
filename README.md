@@ -22,7 +22,7 @@ there.
 | Component       | Version / detail                                   |
 |-----------------|----------------------------------------------------|
 | Host OS         | Arch Linux, GNOME (Wayland session)                |
-| Wine            | 11.9 (Staging)                                     |
+| Wine            | 11.10 (Staging) — also tested on 11.9              |
 | DXVK            | 2.7.1                                              |
 | vkd3d-proton    | 3.0.0 (real D3D12)                                 |
 | GPU             | Intel Iris Xe, Vulkan working                      |
@@ -90,7 +90,8 @@ cd lightroom-cc-on-linux
   6) Post-install fixes
   7) Run Lightroom Classic
   8) Run Creative Cloud app
-  k) Kill the wine session   (if an app hangs or won't relaunch)
+  g) Add to application menu  (desktop launcher; asks DPI + virtual desktop)
+  k) Kill the wine session    (if an app hangs or won't relaunch)
 ```
 
 > **Stuck?** If an app hangs, shows no window, or won't relaunch, pick **`k`**
