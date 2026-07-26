@@ -604,20 +604,36 @@ empties and locks read-only the dunamis feedback dir
 (`c0000135`) — so we deny it the feedback content instead. Re-run the fixes
 script if Masking starts crashing again.
 
-**Import** — wine copies the import thumbnail grid via a **MIT-SHM** (shared
-memory) pixmap whose depth/visual doesn't match the destination window.
+**Import** — Xwayland advertises a depth-24 default visual *and* a depth-32 ARGB
+visual (wine traces it as `init_visuals default visual 23 class 4 argb 7c`).
+Wine composites part of the UI through the ARGB visual, and `X_CopyArea` between
+drawables of *different depth* is a protocol error. Opening Import hits that
+copy, Xlib's default handler aborts, Lightroom dies.
 
-**Default fix (automatic):** `run-lightroom-classic.sh` exports
-`WINE_X11_NO_MITSHM=1`, which makes wine use plain matched copies instead of
-shared-memory pixmaps. Import then works with normal rootless windows (so GNOME
-still HiDPI-scales the UI). Override with `WINE_X11_NO_MITSHM=0`. Launching by
-hand? Just prefix it:
+**Default fix (automatic):** `run-lightroom-classic.sh` pins wine's default
+visual to the depth-32 ARGB one, so every drawable has the same depth:
 
-```bash
-WINE_X11_NO_MITSHM=1 wine "C:\\Program Files\\Adobe\\Adobe Lightroom Classic\\Lightroom.exe"
+```
+HKCU\Software\Wine\AppDefaults\Lightroom.exe\X11 Driver → ScreenDepth = "32"
 ```
 
-**Fallback:** if MIT-SHM-off isn't enough on your setup, run inside a wine
+The launcher writes it on every start (per-app, so nothing else in the prefix is
+touched). `LR_SCREEN_DEPTH=0` skips the write and keeps whatever the prefix has;
+`LR_SCREEN_DEPTH=24` restores wine's default — and the crash. Launching by hand?
+Set the key once with the command above, or:
+
+```bash
+WINEPREFIX=$PWD/wineprefix wine reg add \
+  'HKCU\Software\Wine\AppDefaults\Lightroom.exe\X11 Driver' \
+  /v ScreenDepth /t REG_SZ /d 32 /f
+```
+
+> Earlier revisions of this guide claimed `WINE_X11_NO_MITSHM=1` was the fix.
+> **It never worked** — wine has no such variable (it was only ever requested,
+> wine bug 43893; no `MITSHM` string exists in the wine 11.12 binaries or
+> sources). The export was removed from the launcher.
+
+**Fallback:** if the depth-32 visual isn't enough on your setup, run inside a wine
 virtual desktop — `run-lightroom-classic.sh --vdesktop` (or menu option **8**),
 or by hand:
 
