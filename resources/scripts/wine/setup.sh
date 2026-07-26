@@ -231,6 +231,10 @@ for pair in "d2d1-patched.dll:d2d1.dll" "mfplat-patched.dll:mfplat.dll"; do
       /v "${dst%.dll}" /t REG_SZ /d "native" /f || true
   else
     echo "INFO: $REPO_DIR/resources/stubs/binaries/$src not present — skipping (see GUIDE 6.4/6.5)"
+    if [ "$src" = "d2d1-patched.dll" ]; then
+      echo "      d2d1-patched.dll carries the histogram-fill fix; rebuild it with:"
+      echo "      resources/scripts/wine/build-d2d1-lightroom.sh --install   (or start.sh option 'b')"
+    fi
   fi
 done
 
