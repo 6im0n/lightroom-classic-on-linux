@@ -22,7 +22,7 @@ there.
 | Component       | Version / detail                                   |
 |-----------------|----------------------------------------------------|
 | Host OS         | Arch Linux, GNOME (Wayland session)                |
-| Wine            | 11.10 (Staging) — also tested on 11.9              |
+| Wine            | 11.12 (Staging) — also tested on 11.9, 11.10       |
 | DXVK            | 2.7.1                                              |
 | vkd3d-proton    | 3.0.0 (real D3D12)                                 |
 | GPU             | Intel Iris Xe, Vulkan working                      |
@@ -57,7 +57,7 @@ See [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md). Short version:
 ## Prereqs
 
 - 64-bit Linux, recent kernel
-- Wine 11.8 staging or newer (`wine --version` → `wine-11.9 (Staging)` or similar)
+- Wine 11.8 staging or newer (`wine --version` → `wine-11.12 (Staging)` or similar)
 - `winetricks` (recent), `mingw-w64` (to build the stub DLLs), Vulkan drivers
   + `vulkan-tools`
 - A source of vkd3d-proton (`winetricks vkd3d`, or a Proton / GE-Proton runner)

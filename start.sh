@@ -146,6 +146,7 @@ while true; do
   echo
   echo "${DIM}  --------------- Other ------------------${Z}"
   printf '  10) Set Windows version manually (win7/win10/win11)\n'
+  printf "   b) Rebuild histogram-fix d2d1.dll from Wine source ${DIM}(advanced; ~15 min)${Z}\n"
   printf "   ${R}k) Kill the wine session${Z} ${DIM}(wineserver -k — use if an app hangs/won't relaunch)${Z}\n"
   printf '   r) Reset / wipe the prefix (start over)\n'
   printf '   q) Quit\n'
@@ -241,6 +242,18 @@ while true; do
            case "$vd" in y|Y|yes|YES) _gvd="--vdesktop" ;; esac
            run "$S/lightroom/install-desktop-entry.sh" ${_gdpi:+--dpi=$_gdpi} $_gvd
          fi ;;
+    b|B) echo; echo "${C}${TRI} Rebuild the histogram-fix d2d1.dll from Wine source${Z}"; echo
+         echo "  ${DIM}A patched d2d1.dll is already shipped prebuilt and installed by setup (1);${Z}"
+         echo "  ${DIM}you only need this to rebuild it from source (trust / a different Wine).${Z}"
+         echo "  ${DIM}It fetches Wine 11.10 source (~once, cached) and compiles — several minutes.${Z}"
+         echo
+         if [ "$PREFIX_READY" = 1 ]; then
+           printf '  build and install now? [y/N]: '; read -r _yn
+           case "$_yn" in
+             y|Y) run "$S/wine/build-d2d1-lightroom.sh" --install ;;
+             *) echo "  ${DIM}cancelled.${Z}"; sleep 1 ;;
+           esac
+         else echo "  ${Y}Run setup (1) first.${Z}"; sleep 1.5; fi ;;
     r|R) run "$S/wine/reset-wineprefix.sh" ;;
     q|Q|"") echo "bye."; exit 0 ;;
     *) echo "  ${Y}unknown choice: $choice${Z}"; sleep 1 ;;

@@ -22,7 +22,7 @@ Tested combination:
 | Component       | Version / detail                                   |
 |-----------------|----------------------------------------------------|
 | Host OS         | Arch Linux, GNOME (Wayland session)                |
-| Wine            | 11.10 (Staging) — also tested on 11.9              |
+| Wine            | 11.12 (Staging) — also tested on 11.9, 11.10       |
 | Winetricks      | recent (20240105+)                                 |
 | DXVK            | 2.7.1 (installed via winetricks)                   |
 | Wine Gecko      | 2.47.4 (both x86 and x86_64)                        |
@@ -149,13 +149,13 @@ in section 7.
 Follow WineHQ's per-distro instructions: <https://wiki.winehq.org/Download>
 
 You want `winehq-staging` (Ubuntu/Debian) or `wine-staging` (Fedora/Arch),
-version **11.8 or newer** (we run 11.10; also tested on 11.9).
+version **11.8 or newer** (we run 11.12; also tested on 11.9 and 11.10).
 
 Verify:
 
 ```bash
 wine --version
-# expected: wine-11.10 (Staging)   (or higher)
+# expected: wine-11.12 (Staging)   (or higher)
 ```
 
 If you have a system `wine` already and want this install isolated, WineHQ also
@@ -233,6 +233,32 @@ with `CreateD2DDeviceResources failed. HResult: 0x88990028`. The patched
 `d2d1.dll` registers `ColorManagement` as a passthrough no-op effect, which is
 all LR needs (it never actually invokes the effect at edit time). The override
 (`d2d1=native`) forces wine to load the patched copy.
+
+The same source patch contains a stencil implementation of `PushLayer`
+geometric masks, which restores Lightroom's GPU histogram fills. The launcher
+enables it by default. To disable it if a layered UI regression appears:
+
+```bash
+D2D_LAYER_MASK=0 resources/scripts/lightroom/run-lightroom-classic.sh
+```
+
+The checked-in DLL is reproducible from the pinned Wine 11.10 commit:
+
+```bash
+# Reuse an existing checkout:
+resources/scripts/wine/build-d2d1-lightroom.sh --source-dir /tmp/wine-src
+
+# Or let the script clone Wine 11.10, build, and install into this prefix:
+resources/scripts/wine/build-d2d1-lightroom.sh --install
+```
+
+The source patch is
+`resources/patches/wine/d2d1-lightroom.patch`. The build script verifies commit
+`2cac6ccf33c0807f374dc96f5a20e35a2da86157`, builds only `d2d1`, clears Wine's
+builtin PE marker, and writes
+`resources/stubs/binaries/d2d1-patched.dll`. The binary is built from Wine 11.10
+source but is what runs here on Wine 11.12; rebuild it if Direct2D misbehaves
+after a Wine upgrade (`start.sh` option `b`).
 
 ### The patched `mfplat.dll`
 
@@ -394,6 +420,21 @@ These can only run *after* Classic is on disk. The script:
    ships the files in MixedCase. On real Windows the PE loader is
    case-insensitive; wine on Linux is case-sensitive on disk, so the imports
    fail with `module:import_dll ... not found` unless both names exist.
+3. **Blocks Adobe's dunamis in-app tips.** The tip render path used to abort
+   Lightroom with `BadMatch`/`X_CopyArea`; the script empties the dunamis
+   feedback dir and locks it read-only, so the popup never renders.
+4. **Disables wine's `discburning`.** LR enumerates CD/DVD burners when the
+   Export dialog opens, and wine's implementation blocks the main UI thread —
+   the whole app freezes. The override makes the probe fail fast.
+5. **Installs the dialog-repaint fix** — a proxy `version.dll` in Lightroom's
+   app dir (plus `version_orig.dll`, a copy of wine's builtin it forwards to),
+   scoped to `Lightroom.exe` via a per-app DllOverride. It fixes the blank Copy
+   Settings panel and the ghost rows in the Export preset tree; see
+   `resources/stubs/sources/fix_ghost.c`. Build it first with
+   `resources/scripts/stubs/build-stubs.sh` if the binary is missing.
+
+Re-run this script after a **wine upgrade**: step 5 re-copies `version_orig.dll`
+from the wine you now have (KNOWN_ISSUES #7).
 
 That's all the post-install steps; the `hnetcfg` stub and the patched
 `d2d1`/`mfplat` from `setup.sh` already cover Classic (section 3).
@@ -521,7 +562,7 @@ launcher, the CLI, `start.sh` runs) dies instantly. Kill the stale server:
 WINEPREFIX=$PWD/wineprefix wineserver -k     # or: start.sh option k
 ```
 
-Then relaunch. (Tested across a 11.9 → 11.10 upgrade.)
+Then relaunch. (Tested across 11.9 → 11.10 → 11.12 upgrades.)
 
 ### Installer aborts immediately / "System Requirements check failed"
 
@@ -692,9 +733,38 @@ Known DXVK 2.7.1 limitation (KNOWN_ISSUES #2). Photo colors are correct. Turn
 GPU off in Preferences > Performance for a full-color histogram at the cost of
 edit speed.
 
+### Histogram has coloured outlines but no filled body, with GPU on
+
+wine's Direct2D `PushLayer`/`PopLayer` are unimplemented stubs, so the
+layer-enclosed translucent channel fills are dropped (the outline strokes, drawn
+outside any layer, still render). NOT a DXVK issue — see KNOWN_ISSUES #2 for the
+full trace. Fixed by the patched `d2d1.dll` this repo ships (section 3); if you
+see the fill-less histogram, that DLL is missing or `D2D_LAYER_MASK=0` is set.
+
+### Copy Settings panel blank / Export preset tree leaves ghost rows
+
+wine does not erase removed rows in Export's owner-data listview, and Adobe's
+subclassed Copy Settings checkboxes drop `WM_PAINT` without drawing. Fixed by
+the proxy `version.dll` that `install-lightroom-classic-fixes.sh` installs into
+Lightroom's app dir (KNOWN_ISSUES #6). Re-run that script if the dialogs start
+ghosting again — e.g. after a wine upgrade left `version_orig.dll` stale.
+
+### Export window freezes the whole app
+
+wine's `discburning.dll` (IMAPI2) blocks the main UI thread while LR enumerates
+CD/DVD burners on Export open. The launcher exports
+`WINEDLLOVERRIDES="discburning=;…"` and the fixes script writes the same
+override to the prefix registry, so the probe fails fast instead
+(KNOWN_ISSUES #6b).
+
 ### Want to debug the ML-masking failure yourself
 
-`resources/scripts/lightroom/debug-lightroom-classic-ml.sh` launches LrC with vkd3d/shader warnings
-on, logging to `/tmp/lrc-ml-debug.log`. Trigger detection, quit, then run the
-`grep` it prints. (We've already chased this to Adobe's encrypted-model wall;
-see KNOWN_ISSUES #1.)
+`resources/scripts/lightroom/debug-lightroom-classic-ml.sh` clears the wine
+session, then launches LrC with the channels that matter for the ML path
+(`+loaddll,+seh,+combase,+ole,+module`), logging to `/tmp/lrc-ml-debug.log`.
+Trigger a mask (Develop > Masking > Select Sky), close LrC, and it prints a
+summary itself: which ML/stream DLLs loaded and in what order, missing WinRT
+classes, failed imports, access violations, and the CameraRaw WML verdict.
+
+It force-sets `WINEDEBUG` (a value exported in your shell would otherwise hide
+those channels); override deliberately with `ML_WINEDEBUG=…`.

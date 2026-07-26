@@ -31,6 +31,43 @@ for _a in "$@"; do
 done
 set -- "${_args[@]+"${_args[@]}"}"
 
+# ---------------------------------------------------------------------------
+# Clear the wine session before every launch.
+#
+# Lightroom.exe statically imports KERNEL32.UnregisterApplicationRecoveryCallback,
+# which wine does not export. Wine wires an aborting stub into that import slot,
+# so closing Lightroom kills the thread mid-shutdown:
+#
+#   wine: Call from ... to unimplemented function
+#         KERNEL32.dll.UnregisterApplicationRecoveryCallback, aborting
+#
+# The window disappears but the process stays alive holding its locks, and the
+# next launch then deadlocks against it:
+#
+#   err:sync:RtlpWaitForCriticalSection ... wait timed out in thread ..., blocked by ...
+#
+# Adobe's background services (Adobe Desktop Service, AdobeIPCBroker, CoreSync)
+# linger the same way. So kill the prefix's wine session first — nothing on disk
+# is touched, only running processes. Lightroom is single-instance anyway: a
+# second copy deadlocks rather than opening a window.
+#
+# LR_KILL_STALE=0 skips this (e.g. to attach a debugger to a running instance).
+# ---------------------------------------------------------------------------
+LR_KILL_STALE="${LR_KILL_STALE:-1}"
+if [ "$LR_KILL_STALE" != 0 ]; then
+  if pgrep -f 'Lightroom\.exe' >/dev/null 2>&1; then
+    echo "==> clearing the previous wine session (stale Lightroom teardown)"
+  fi
+  WINEPREFIX="$REPO_DIR/wineprefix" wineserver -k >/dev/null 2>&1 || true
+  # wineserver -k returns before the processes are reaped; wait for them so the
+  # new instance never races the old one's locks.
+  _n=0
+  while pgrep -f 'Lightroom\.exe' >/dev/null 2>&1 && [ "$_n" -lt 20 ]; do
+    sleep 0.25
+    _n=$((_n + 1))
+  done
+fi
+
 # HiDPI: wine renders at 96 DPI (100%) by default, which looks tiny on
 # high-density screens. Set LR_DPI to scale the whole UI:
 #   96 = 100%   120 = 125%   144 = 150%   168 = 175%   192 = 200%
@@ -200,6 +237,23 @@ export DXVK_CONFIG_FILE="$PREFIX/dxvk.conf"
 export WINEPREFIX="$PREFIX"
 export WINEARCH=win64
 export WINEDEBUG="$WINEDEBUG"
+
+# Direct2D geometric-mask layers. The custom d2d1.dll contains a stencil-based
+# PushLayer mask implementation that restores Lightroom's histogram fills.
+# Enabled by default; disable it if a layered UI regression appears:
+#   D2D_LAYER_MASK=0 resources/scripts/lightroom/run-lightroom-classic.sh
+export D2D_LAYER_MASK="${D2D_LAYER_MASK:-1}"
+if [ "$D2D_LAYER_MASK" != 0 ]; then
+  echo "==> Direct2D geometric-mask layers: enabled"
+fi
+
+# Disable wine's discburning (IMAPI2) DLL. Lightroom's Export dialog enumerates
+# CD/DVD burners through it on open, and wine's implementation blocks the main
+# UI thread on an object that never signals -> Export freezes the whole app.
+# install-lightroom-classic-fixes.sh also writes this to the prefix registry;
+# we set it here too so a direct run is safe even before fixes are applied.
+# Merge with any caller-supplied WINEDLLOVERRIDES.
+export WINEDLLOVERRIDES="discburning=;${WINEDLLOVERRIDES:-}"
 
 if [ "$LR_VDESKTOP" = off ]; then
   exec "${WINE:-wine}" "$LR_EXE" "$@"
