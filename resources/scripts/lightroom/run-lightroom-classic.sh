@@ -201,6 +201,16 @@ export WINEPREFIX="$PREFIX"
 export WINEARCH=win64
 export WINEDEBUG="$WINEDEBUG"
 
+# Direct2D geometric-mask layers. The custom d2d1.dll contains a stencil-based
+# PushLayer mask implementation that restores Lightroom's histogram fills.
+# Enabled by default; disable it if a layered UI regression appears:
+#   D2D_LAYER_MASK=0 resources/scripts/lightroom/run-lightroom-classic.sh
+export D2D_LAYER_MASK="${D2D_LAYER_MASK:-1}"
+if [ "$D2D_LAYER_MASK" != 0 ]; then
+  echo "==> Direct2D geometric-mask layers: enabled"
+fi
+
+
 if [ "$LR_VDESKTOP" = off ]; then
   exec "${WINE:-wine}" "$LR_EXE" "$@"
 else
