@@ -759,7 +759,12 @@ override to the prefix registry, so the probe fails fast instead
 
 ### Want to debug the ML-masking failure yourself
 
-`resources/scripts/lightroom/debug-lightroom-classic-ml.sh` launches LrC with vkd3d/shader warnings
-on, logging to `/tmp/lrc-ml-debug.log`. Trigger detection, quit, then run the
-`grep` it prints. (We've already chased this to Adobe's encrypted-model wall;
-see KNOWN_ISSUES #1.)
+`resources/scripts/lightroom/debug-lightroom-classic-ml.sh` clears the wine
+session, then launches LrC with the channels that matter for the ML path
+(`+loaddll,+seh,+combase,+ole,+module`), logging to `/tmp/lrc-ml-debug.log`.
+Trigger a mask (Develop > Masking > Select Sky), close LrC, and it prints a
+summary itself: which ML/stream DLLs loaded and in what order, missing WinRT
+classes, failed imports, access violations, and the CameraRaw WML verdict.
+
+It force-sets `WINEDEBUG` (a value exported in your shell would otherwise hide
+those channels); override deliberately with `ML_WINEDEBUG=…`.
