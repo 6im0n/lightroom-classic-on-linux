@@ -1,7 +1,7 @@
 # Known Issues
 
 Limitations and rough edges of Adobe **Lightroom Classic** under Wine, as of
-wine 11.9 staging + DXVK 2.7.1 + vkd3d-proton 3.0.0 on Intel Iris Xe (Arch /
+wine 11.12 staging + DXVK 2.7.1 + vkd3d-proton 3.0.0 on Intel Iris Xe (Arch /
 GNOME). None of these block the core workflow — install, launch, the Develop
 module, manual edits, and GPU acceleration all work. The rough edges are around
 AI features, the histogram, HDR, and log noise.
@@ -112,6 +112,44 @@ leave a stale wineserver in mixed driver state. Clear it before relaunching:
 
 ```bash
 WINEPREFIX=$PWD/wineprefix wineserver -k
+```
+
+---
+
+## 6. A wine upgrade silently undoes parts of the setup
+
+Upgrading wine (e.g. 11.9/11.10 → 11.12) re-runs the prefix update on the next
+launch, and that rewrites registry areas this project configures. Symptoms are
+features that "used to work" going quiet again — nothing crashes loudly.
+
+**What gets reset**
+
+- **WinRT stream classes (AI masking).** The prefix update rewrites
+  `HKLM\Software\Microsoft\WindowsRuntime\ActivatableClassId` and points
+  `Windows.Storage.Streams.DataWriter` back at wine's `wintypes.dll` and
+  `RandomAccessStreamReference` at wine's `windows.storage.dll` (wine 11.12 ships
+  both), while `InMemoryRandomAccessStream` keeps pointing at ours — a mixed
+  stack. `run-lightroom-classic.sh` now re-asserts all three at launch; running
+  `install-ai-masking.sh` again also fixes it.
+- **`version_orig.dll`.** The dialog-repaint proxy forwards to a copy of wine's
+  builtin `version.dll` taken at install time. After an upgrade that copy is
+  stale; the launcher warns, and `install-lightroom-classic-fixes.sh` refreshes it.
+
+**What does *not* get reset** — the per-app keys under
+`HKCU\Software\Wine\AppDefaults\Lightroom.exe` (`ScreenDepth`, `version`
+override) and `HKCU\Software\Wine\DllOverrides` survive prefix updates.
+
+**Native DLLs are built against a pinned wine tree.** `d2d1-patched.dll` comes
+from wine **11.10** source (`resources/patches/wine/d2d1-lightroom.patch`). It
+keeps working across minor upgrades, but if Direct2D misbehaves after one,
+rebuild it against the wine you actually run.
+
+**After every wine upgrade:**
+
+```bash
+WINEPREFIX=$PWD/wineprefix wineserver -k          # stale server blocks launches
+resources/scripts/lightroom/install-lightroom-classic-fixes.sh
+resources/scripts/lightroom/install-ai-masking.sh  # if masking is installed
 ```
 
 ---

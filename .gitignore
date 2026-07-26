@@ -27,3 +27,6 @@ __pycache__/
 .vscode/
 *.bak
 *~
+
+# GE-Proton variant prefix
+wineprefix-proton/
