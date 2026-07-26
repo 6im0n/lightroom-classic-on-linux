@@ -210,6 +210,13 @@ if [ "$D2D_LAYER_MASK" != 0 ]; then
   echo "==> Direct2D geometric-mask layers: enabled"
 fi
 
+# Disable wine's discburning (IMAPI2) DLL. Lightroom's Export dialog enumerates
+# CD/DVD burners through it on open, and wine's implementation blocks the main
+# UI thread on an object that never signals -> Export freezes the whole app.
+# install-lightroom-classic-fixes.sh also writes this to the prefix registry;
+# we set it here too so a direct run is safe even before fixes are applied.
+# Merge with any caller-supplied WINEDLLOVERRIDES.
+export WINEDLLOVERRIDES="discburning=;${WINEDLLOVERRIDES:-}"
 
 if [ "$LR_VDESKTOP" = off ]; then
   exec "${WINE:-wine}" "$LR_EXE" "$@"
