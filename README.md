@@ -1,8 +1,9 @@
 # Adobe Lightroom Classic on Linux via Wine
 
-**Status:** Working as of 2026-05-29 — install, launch, the Develop module,
-manual edits, and GPU acceleration all work. AI Masking does not (see
-[`KNOWN_ISSUES.md`](KNOWN_ISSUES.md)).
+**Status:** Working as of 2026-07-27 on wine 11.12 staging — install, launch,
+the Develop module, manual edits, GPU acceleration, **AI masking** (Select
+Subject / Sky / Objects) and the **filled colour histogram** all work. HDR is
+the only feature still missing (see [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md)).
 
 ![Screenshot](https://github.com/6im0n/lightroom-classic-on-linux/blob/main/resources/ScreenShot/ScreenShot_9.png)
 
@@ -35,31 +36,36 @@ too — we tested on Intel Iris Xe.
 
 - Installing Lightroom Classic — either from the standalone `Set-up.exe` or via
   the Adobe Creative Cloud desktop app.
-- Launching into the Library module.
+- Launching into the Library module; the Import window.
 - The **Develop** module and all manual edits (sliders, tone, color, masks you
   paint by hand, crop, etc).
+- **AI masking** — Select Subject / Select Sky / Select Objects, running on the
+  CPU path. Enable it with menu option `a` (`install-ai-masking.sh`).
 - **GPU acceleration** (Prefs > Performance detects the GPU once vkd3d-proton's
   real D3D12 is installed).
+- The **filled colour histogram** with GPU on, via the patched `d2d1.dll` this
+  repo ships.
+- The **Export** and **Copy Settings** dialogs (no freeze, no ghost rows), via
+  the proxy `version.dll` the post-install fixes install.
 
 ## What doesn't work
 
 See [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md). Short version:
 
-- **AI Masking** (object / subject / background detection, AI Denoise) — Adobe's
-  on-device ML models are encrypted; the failure is inside Adobe's proprietary
-  decrypt-then-load step, not a wine gap. We declined to reverse-engineer it.
-- **Color histogram is monochrome** when GPU acceleration is on (a DXVK 2.7.1
-  limitation; photo colors are correct). Turn GPU off for a full-color
-  histogram at the cost of speed.
 - **HDR** is not available (needs native Wayland + compositor HDR, which crashes
-  LrC on this GNOME / wine combo).
+  LrC on this GNOME / wine combo). This is the only feature-level gap left.
+- **AI Denoise** has not been verified — it's a different Adobe code path from
+  the masking one that was fixed.
+- Every other entry in `KNOWN_ISSUES.md` is a **solved** problem kept for the
+  diagnosis trail, plus maintenance notes (a wine upgrade resets parts of the
+  setup — `KNOWN_ISSUES.md` #7).
 
 ## Prereqs
 
 - 64-bit Linux, recent kernel
 - Wine 11.8 staging or newer (`wine --version` → `wine-11.12 (Staging)` or similar)
-- `winetricks` (recent), `mingw-w64` (to build the stub DLLs), Vulkan drivers
-  + `vulkan-tools`
+- `winetricks` (recent), `mingw-w64` **and native `gcc`** (to build the stub
+  DLLs and the AI-masking shims), Vulkan drivers + `vulkan-tools`
 - A source of vkd3d-proton (`winetricks vkd3d`, or a Proton / GE-Proton runner)
 - A valid Lightroom Classic license and Adobe's standalone offline installer
   (`Set-up.exe` + its sibling `products/`, `resources/`, `packages/` folders).
@@ -71,8 +77,8 @@ See [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md). Short version:
 Install the [prereqs](#prereqs) above, then just run the menu:
 
 ```bash
-git clone https://github.com/sander110419/lightroom-cc-on-linux.git
-cd lightroom-cc-on-linux
+git clone https://github.com/6im0n/lightroom-classic-on-linux.git
+cd lightroom-classic-on-linux
 ./start.sh
 ```
 
@@ -81,26 +87,34 @@ cd lightroom-cc-on-linux
 `scripts/` for you, in the right order. Follow the arrow:
 
 ```
-  1) Prepare wine prefix (setup)              ← start here
-  2) Install GPU acceleration (vkd3d-proton)
-  Install Lightroom Classic — pick ONE route:
-  3) via Creative Cloud — online installer    (recommended; full CC app + panels)
-  4) via Creative Cloud — offline ACCCx.zip    (back-version; panels stay blank)
-  5) via standalone Set-up.exe                 (simplest if you only want Classic)
-  6) Post-install fixes
-  7) Run Lightroom Classic
-  8) Run Creative Cloud app
-  g) Add to application menu  (desktop launcher; asks DPI + virtual desktop)
-  k) Kill the wine session    (if an app hangs or won't relaunch)
+   1) Prepare wine prefix (setup)              ← start here
+   2) Install GPU acceleration (vkd3d-proton)
+   Install Lightroom Classic — pick ONE route:
+   3) via Creative Cloud — online installer    (recommended; full CC app + panels)
+   4) via Creative Cloud — offline ACCCx.zip   (back-version; panels stay blank)
+   5) via standalone Set-up.exe                (simplest if you only want Classic)
+   6) Post-install fixes
+   a) Enable AI masking                        (Select Subject / Sky / Objects)
+   7) Run Lightroom Classic
+   8) Run Lightroom Classic — virtual desktop  (fallback if something crashes)
+   9) Run Creative Cloud app
+   d) Lightroom UI scale       (DPI)
+   g) Add to application menu  (desktop launcher; asks DPI + virtual desktop)
+  10) Set Windows version manually (win7/win10/win11)
+   b) Rebuild histogram-fix d2d1.dll from Wine source  (advanced; ~15 min)
+   k) Kill the wine session    (if an app hangs or won't relaunch)
+   r) Reset / wipe the prefix  (start over)
 ```
 
 > **Stuck?** If an app hangs, shows no window, or won't relaunch, pick **`k`**
 > (`wineserver -k`) — it kills the leftover Adobe background processes without
 > touching your install. The safe "off and on again" before resetting.
 
-**Just want Lightroom Classic?** Do `1 → 2 → 5 → 6 → 7`. For step 5, drop Adobe's
-standalone installer at `resources/installers/lightroom/Set-up.exe` (with its sibling
-`products/ resources/ packages/` folders) first.
+**Just want Lightroom Classic?** Do `1 → 2 → 5 → 6 → a → 7`. For step 5, drop
+Adobe's standalone installer at `resources/installers/lightroom/Set-up.exe` (with
+its sibling `products/ resources/ packages/` folders) first. Step `a` (AI
+masking) is optional but recommended — it compiles two small shims and needs
+`mingw-w64` + `gcc`.
 
 **Want the Creative Cloud desktop app too** (Apps panel, updates)? Use route `3`
 — the **online** installer (`Creative_Cloud_Set-Up.exe`, dropped in
@@ -109,25 +123,41 @@ never load under wine; see [`GUIDE.md`](GUIDE.md) §5.
 
 Prefer to run the steps by hand, or want to know what each does and why? Every
 script is documented in [`GUIDE.md`](GUIDE.md) — the menu is just a convenience
-wrapper around them. The launchers honor `LR_DPI` (HiDPI, default 144) and
-`LR_DRIVER` (`auto`/`x11`/`wayland`, default x11).
+wrapper around them. The launcher honors `LR_DPI` (HiDPI, default 144),
+`LR_DRIVER` (`auto`/`x11`/`wayland`, default x11), `LR_MASKING`/`FAKERAM_GB`
+(AI masking), `D2D_LAYER_MASK` (histogram fills) and `LR_KILL_STALE` — all
+listed in [`GUIDE.md`](GUIDE.md) §8.
 
 ## How it works
 
 See [`GUIDE.md`](GUIDE.md) for the full walkthrough — every fix explained and
 why it's needed. The non-obvious pieces:
 
-1. **Patched `d2d1.dll`** registering `CLSID_D2D1ColorManagement` (wine doesn't
-   ship that builtin effect; LR's startup probe needs it). (sander110419)
+1. **Patched `d2d1.dll`** — registers `CLSID_D2D1ColorManagement` as a
+   passthrough (wine doesn't ship that builtin effect; LR's startup probe needs
+   it, idea from sander110419) **and** implements `PushLayer` geometric masks
+   through a D3D11 stencil buffer, which is what restores the histogram fills
+   and keeps thumbnail grids from going blank. Built from the pinned Wine 11.10
+   source patch in `resources/patches/wine/`.
 2. **Patched `mfplat.dll`** with a `MFCreateSampleCopierMFT` forwarder. (sander110419)
 3. **A tiny `hnetcfg.dll` stub** returning an empty firewall-rules enumerator,
    so Classic's in-process COM load of `hnetcfg` (firewall config) succeeds
    instead of failing with `c0000135`. (sander110419)
-4. **Windows 11 OS version** — the standalone Adobe installer rejects anything
+4. **`winrt_inmemstream.dll` + `fakeram.so`** — our own
+   `Windows.Storage.Streams` WinRT classes (with the `IAsyncInfo` wine omits)
+   so WinML can actually hand Adobe's ONNX models to onnxruntime, plus an
+   `LD_PRELOAD` RAM cap so onnxruntime's arena doesn't try to take all of RAM.
+   This is what makes **AI masking** work.
+5. **A proxy `version.dll`** loaded only by `Lightroom.exe`, hooking dialog
+   repaints so the Copy Settings panel draws and the Export preset tree stops
+   leaving ghost rows.
+6. **Windows 11 OS version** — the standalone Adobe installer rejects anything
    below Win10.
-5. **`winegstreamer` disabled during install** so the installer UI doesn't abort
+7. **`winegstreamer` disabled during install** so the installer UI doesn't abort
    on the stubbed `mfplat.MFCreateAudioMediaType`.
-6. **vkd3d-proton's real D3D12** to replace wine's fake placeholder adapter, so
+8. **vkd3d-proton's real D3D12** to replace wine's fake placeholder adapter, so
    the GPU is enumerated and qualified.
-7. **Lowercase symlinks** for Adobe-bundled DLLs (wine's PE loader is
+9. **Lowercase symlinks** for Adobe-bundled DLLs (wine's PE loader is
    case-sensitive on disk).
+10. **Per-app registry pins** — `ScreenDepth=32` (Xwayland depth mismatch would
+    abort Import) and `discburning` disabled (its IMAPI2 probe froze Export).
