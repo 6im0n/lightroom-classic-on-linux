@@ -61,6 +61,13 @@ detect() {
   if [ "$LR_INSTALLED" = 1 ] && { [ -f "$LRD/AdobeGrowthSDK.dll.disabled" ] || [ ! -f "$LRD/AdobeGrowthSDK.dll" ]; }; then
     FIXES_DONE=1
   fi
+  # AI masking is "done" when our WinRT stream DLL is installed AND all three
+  # runtimeclasses point at it (a wine upgrade resets some of them).
+  MASKING_DONE=0
+  if [ -f "$PREFIX/drive_c/windows/system32/winrt_inmemstream.dll" ] &&
+     [ "$(grep -c 'winrt_inmemstream\.dll' "$PREFIX/system.reg" 2>/dev/null || echo 0)" -ge 3 ]; then
+    MASKING_DONE=1
+  fi
   # standalone installer available?
   STANDALONE=0
   [ -f "$REPO_DIR/resources/installers/lightroom/Set-up.exe" ] && STANDALONE=1
@@ -75,6 +82,7 @@ detect() {
   elif [ "$CC_INSTALLED" = 0 ] && [ "$LR_INSTALLED" = 0 ]; then NEXT=install
   elif [ "$CC_INSTALLED" = 1 ] && [ "$LR_INSTALLED" = 0 ]; then NEXT=runcc
   elif [ "$LR_INSTALLED" = 1 ] && [ "$FIXES_DONE" = 0 ];   then NEXT=fixes
+  elif [ "$LR_INSTALLED" = 1 ] && [ "$MASKING_DONE" = 0 ]; then NEXT=masking
   else                                                          NEXT=runlr
   fi
 }
@@ -102,6 +110,7 @@ banner() {
   printf '  %b  Creative Cloud app installed\n' "$(flag "$CC_INSTALLED")"
   printf '  %b  Lightroom Classic installed\n'  "$(flag "$LR_INSTALLED")"
   printf '  %b  post-install fixes applied\n'   "$(flag "$FIXES_DONE")"
+  printf '  %b  AI masking enabled\n'           "$(flag "$MASKING_DONE")"
   echo
 }
 
@@ -135,6 +144,7 @@ while true; do
   printf "   4) via Creative Cloud — offline ACCCx.zip  ${DIM}(back-version;)${Z}\n"
   printf '   5) via standalone Set-up.exe\n'
   printf '   6) Post-install fixes%b\n'                         "$(mark fixes)"
+  printf "   a) Enable AI masking ${DIM}(Select Subject / Sky / Objects — needs mingw-w64 + gcc)${Z}%b\n" "$(mark masking)"
   echo
   if [ -n "$LR_DPI_SET" ]; then _dpilbl="$(dpi_pct "$LR_DPI_SET")% (${LR_DPI_SET} dpi)"; else _dpilbl="default 150% (144 dpi)"; fi
   echo "${DIM}  -------------- Run apps ---------------------${Z}"
@@ -165,6 +175,8 @@ while true; do
     5) if [ "$PREFIX_READY" = 1 ]; then run "$S/lightroom/install-lightroom-classic.sh"
        else echo "  ${Y}Run setup (1) first.${Z}"; sleep 1.5; fi ;;
     6) if [ "$LR_INSTALLED" = 1 ]; then run "$S/lightroom/install-lightroom-classic-fixes.sh"
+       else echo "  ${Y}Install Lightroom Classic first (3, 4 or 5).${Z}"; sleep 1.5; fi ;;
+    a|A) if [ "$LR_INSTALLED" = 1 ]; then run "$S/lightroom/install-ai-masking.sh"
        else echo "  ${Y}Install Lightroom Classic first (3, 4 or 5).${Z}"; sleep 1.5; fi ;;
     7) if [ "$LR_INSTALLED" = 1 ]; then run "$S/lightroom/run-lightroom-classic.sh" ${LR_DPI_SET:+--dpi=$LR_DPI_SET}
        else echo "  ${Y}Lightroom Classic is not installed yet.${Z}"; sleep 1.5; fi ;;
