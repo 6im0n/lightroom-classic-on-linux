@@ -3,56 +3,82 @@
 Limitations and rough edges of Adobe **Lightroom Classic** under Wine, as of
 wine 11.12 staging + DXVK 2.7.1 + vkd3d-proton 3.0.0 on Intel Iris Xe (Arch /
 GNOME). None of these block the core workflow — install, launch, the Develop
-module, manual edits, and GPU acceleration all work. The rough edges are around
-AI features, the histogram, HDR, a couple of dialogs (Copy Settings / Export)
-with a wine repaint bug, and log noise.
+module, manual edits, GPU acceleration, **AI masking** and the **filled
+histogram** all work now.
+
+Entries #1 (AI masking), #2 (histogram fill), #6 (dialog ghosting), #6b (Export
+freeze) and #8 (Import crash) are **fixed** and kept here for the diagnosis
+trail — what the real cause turned out to be, and which script applies the fix.
+Only **HDR** (#3) is still a hard limitation; the rest is log noise (#4) and
+maintenance you need to know about (#5 stale wineserver, #7 wine upgrades).
 
 ---
 
-## 1. AI Masking does not work (object / subject / background detect, AI Denoise)
+## 1. AI Masking (Select Subject / Sky / Objects) — FIXED (2026-06-02)
 
-**Symptom:** triggering an AI mask (select subject, select sky/background,
-object detection) or AI Denoise produces nothing; the CameraRaw log ends with
-`*** Error: ML model not loaded ***`.
+**Old symptom:** triggering an AI mask produced nothing; the CameraRaw log ended
+with `*** Error: ML model not loaded ***`, sometimes preceded by a `0xc0000005`
+inside `microsoft.ai.machinelearning.dll`.
 
-**Root cause — named, and it is NOT a wine deficiency.** We rule-ruled this out
-exhaustively (observability only, no reverse-engineering):
+**Real root cause — a wine gap after all, in WinRT, not in Adobe's crypto.**
+Adobe runs the masking ONNX models through **WinML**
+(`microsoft.ai.machinelearning` + `onnxruntime`), and WinML feeds each model to
+onnxruntime through a chain of `Windows.Storage.Streams` WinRT runtimeclasses
+that wine only half-implements. Two independent blockers:
 
-- **The ML platform works under wine.** A purpose-built probe that loaded
-  Adobe's *own* `onnxruntime.dll` (v1.23.0) under wine + vkd3d-proton via the
-  ORT C API confirmed: `CreateEnv`, session options,
-  `AppendExecutionProvider_CPU` and `AppendExecutionProvider_DML` all succeed,
-  the provider list includes `Dml` and `CPU`, and creating a session from a
-  hand-built minimal `.onnx` **succeeds on both DML and CPU**. So
-  onnxruntime + DirectML-on-vkd3d-proton + the crypto stack are all functional
-  under wine.
-- **Crypto is fine.** A `bcrypt` trace shows `BCryptGenerateSymmetricKey` /
-  `BCryptCreateHash` succeeding; the only unimplemented calls are trivial and
-  irrelevant. Decryption primitives work.
-- **The models are present and valid on disk** (42 non-empty `.data` files under
-  `Resources/ModelZoo/*/winml/`, md5s matching `Index.dat`). The
-  `CameraRaw/ModelZoo/CloudDownload` misses are just LR checking for cloud
-  updates and falling back to local — normal.
+1. **The WinRT stream chain.** WinML needs
+   `InMemoryRandomAccessStream`, `DataWriter` and
+   `RandomAccessStreamReference`. Wine's coverage is partial, and — critically —
+   its async results do not expose **`IAsyncInfo`**, which WinML's await path
+   calls (`get_Status`) before touching the result: that null-deref *is* the
+   `0xc0000005`. On top of that, `OpenReadAsync` must hand back a stream
+   rewound to position 0 or WinML reads a truncated model.
+2. **onnxruntime sizes its CPU inference arena to TOTAL system RAM.** On a 16 GB
+   box it logs `CPU memory (15.305 GB)` and tries to take essentially all of it
+   — OOM, or a frozen desktop, before any inference happens.
 
-**Where it actually fails:** Adobe's masking models are encrypted
-`secured_file` blobs (high-entropy `.data`, no ONNX magic). The failure is
-inside Adobe's proprietary **WFML decrypt-then-load** step — *before* inference
-ever reaches onnxruntime — and is completely silent (Adobe overrides the ORT
-logger; nothing in wine stderr or LR logs). Pinpointing further would mean
-reverse-engineering Adobe's model encryption / content protection. **We
-declined to do that. This is a definitive stop point — not a wine bug.**
+**The fix — `install-ai-masking.sh` (menu option `a`):**
 
-> Note: spoofing the GPU as AMD (`LR_GPU_SPOOF=1`, GUIDE §7) flips LR's
-> `Masking AI inference running on CPU: Intel parts` decision onto the
-> GPU/DirectML path, but masking *still* fails at this same encrypted-model
-> wall — and the spoof blanks the histogram (see #2). So the spoof is off by
-> default.
+- Builds **`winrt_inmemstream.dll`**
+  (`resources/stubs/sources/winrt_inmemstream.c`, mingw-w64), a small in-process
+  WinRT DLL implementing all three runtimeclasses **with `IAsyncInfo` on its
+  async results** and a rewind in `OpenReadAsync`; installs it into `system32`
+  and points the three `HKLM\…\WindowsRuntime\ActivatableClassId` entries at it.
+- Builds **`fakeram.so`** (`resources/stubs/sources/fakeram.c`, native gcc), an
+  `LD_PRELOAD` shim that caps the RAM wine reports (`sysinfo` +
+  `/proc/meminfo`) so the arena is bounded. `run-lightroom-classic.sh` loads it
+  automatically (`LR_MASKING=auto`, default cap ≈60 % of real RAM, floor 6 GB;
+  override with `FAKERAM_GB=<N>`, disable with `LR_MASKING=off`).
+
+Masking then runs on the **CPU** path (LR sees an Intel iGPU and picks CPU) and
+produces real masks.
+
+> **Do not use the AMD GPU spoof with masking.** `LR_GPU_SPOOF=1` (GUIDE §7)
+> flips LR off its `Masking AI inference running on CPU: Intel parts` decision
+> onto DirectML/vkd3d, which **hangs the integrated GPU** — and it blanks the
+> histogram (#2). `install-ai-masking.sh` strips the spoof out of `dxvk.conf`
+> for you. Normal GPU acceleration for Develop is unaffected.
+
+> **The earlier conclusion in this file was wrong.** It read: *"Adobe's models
+> are encrypted `secured_file` blobs; the failure is inside Adobe's proprietary
+> WFML decrypt-then-load step — a definitive stop point, not a wine bug."* The
+> encrypted blobs are real, but Adobe's decrypt path was never the blocker: it
+> never got that far, because the model never arrived through the broken WinRT
+> stream chain. The supporting probes still hold — onnxruntime (v1.23.0) loads
+> under wine on both CPU and DML, `bcrypt` works, and the 42 `.data` models on
+> disk match `Index.dat`.
+
+**After a wine upgrade** the prefix update re-points some of those
+runtimeclasses back at wine's builtins (see #7). The launcher re-asserts all
+three on every start; re-running `install-ai-masking.sh` also fixes it.
+
+> **AI Denoise** is a different Adobe code path and has not been verified here.
 
 ---
 
-## 2. Color histogram is "buggy" when GPU acceleration is on
+## 2. Histogram drawn without its filled body, GPU on — FIXED (2026-06-10)
 
-**Symptom:** with GPU acceleration enabled (Preferences > Performance), the
+**Old symptom:** with GPU acceleration enabled (Preferences > Performance), the
 Develop/Library histogram draws the R/G/B/luminance curve **outlines** in colour
 but is missing its translucent **filled body** — a flat grey panel with coloured
 lines instead of the usual filled, blended channel "mountains". The **photo image
@@ -95,14 +121,16 @@ outside any layer. The patch now composes `maskTransform` with the world
 transform captured at push time, and `PopLayer` erases with that same snapshot
 so nested layers cannot leak stencil levels.
 
-**Workaround:** turn GPU acceleration **off** in Preferences > Performance — the
-histogram then renders in full color, at the cost of slower editing. But, you can
-keep GPU on (for speed) and accept the fill-less histogram.
+**Fallback (only if you disable the patch):** turning GPU acceleration **off** in
+Preferences > Performance also gives a full-colour filled histogram, at the cost
+of much slower editing. With the patched `d2d1.dll` in place you don't need it —
+GPU on and the histogram fills correctly.
 
-> The Intel→AMD GPU spoof (`LR_GPU_SPOOF=1`) makes this *worse* — it blanks the
-> histogram entirely — which is one reason the spoof is off by default.
-
-> Spoof was using to trying to load ML for masking on the GPU, since intel gpu is know to be blacklisted by adobe...
+> The Intel→AMD GPU spoof (`LR_GPU_SPOOF=1`) blanks the histogram entirely, and
+> hangs the iGPU when masking runs (#1). It is off by default and
+> `install-ai-masking.sh` removes it if an older run left it in `dxvk.conf`.
+> Its original purpose — pushing masking ML onto the GPU, because Adobe routes
+> Intel parts to CPU — is obsolete: masking now works on the CPU path.
 ---
 
 ## 3. HDR is not available
@@ -124,11 +152,12 @@ uses sRGB / ICC color management). The launcher silences them by default.
 listed here so you know what they are if you turn logging back on:
 
 - **`RoGetActivationFactory ... Failed to find library`** for WinRT runtimeclasses
-  wine doesn't implement (`Windows.Media.Core.MediaSource`,
-  `Windows.Storage.Streams.InMemoryRandomAccessStream`, etc). Used for
-  video/tutorial playback paths; LR falls back fine. (We even built a real
-  working `InMemoryRandomAccessStream` factory to prove this error is not the
-  cause of AI masking failing — it isn't.)
+  wine doesn't implement (`Windows.Media.Core.MediaSource` and friends). Used for
+  video/tutorial playback paths; LR falls back fine. The three
+  `Windows.Storage.Streams` classes are **not** in this category any more — they
+  are supplied by `winrt_inmemstream.dll` and are what makes AI masking work
+  (#1); if you see that error naming one of *those*, masking is not installed or
+  a wine upgrade reset its registration (#7).
 - **Adobe-internal CLSID "class not registered"** (`e26b366d-…` and similar).
 - **EDID / colorimetry / "Failed to parse display metadata"** from DXVK — wine
   has no monitor EDID in the registry on the X11 path (see #3).
@@ -347,11 +376,17 @@ never implemented; the string does not exist in the wine 11.12 binaries).
 
 For contrast — verified working under the tested environment:
 
-- Installing Lightroom Classic from the standalone `Set-up.exe`.
+- Installing Lightroom Classic from the standalone `Set-up.exe` or from the
+  Creative Cloud desktop app.
 - Launching into the Library module.
 - The Develop module and all manual edits (tone, color, hand-painted masks,
   crop, etc).
-- The Import window (with the `ScreenDepth=32` fix above).
-- Export and Copy Settings dialogs (with the repaint proxy, #6).
+- **AI masking** — Select Subject / Select Sky / Select Objects, on the CPU
+  path (with `install-ai-masking.sh`, #1).
+- The **filled colour histogram** with GPU acceleration on (with the patched
+  `d2d1.dll`, #2).
+- The Import window (with the `ScreenDepth=32` fix above, #8).
+- Export and Copy Settings dialogs (with the repaint proxy, #6; no Export
+  freeze, #6b).
 - GPU acceleration (real D3D12 via vkd3d-proton; Preferences > Performance
   detects the GPU).
