@@ -177,7 +177,7 @@ LR_EXE="C:\\Program Files\\Adobe\\Adobe Lightroom Classic\\Lightroom.exe"
 # ---------------------------------------------------------------------------
 # AI masking (Select Subject / Sky / Objects).
 #
-# Enabled by install-ai-masking.sh, which builds stubs/binaries/fakeram.so and
+# Enabled by install-ai-masking.sh, which builds resources/stubs/binaries/fakeram.so and
 # registers our WinRT stream classes. onnxruntime sizes its CPU inference arena
 # to TOTAL RAM; on a 16 GB box it would try to grab everything and OOM/freeze.
 # fakeram.so (LD_PRELOAD) caps the RAM wine reports so the arena is bounded.
@@ -189,7 +189,7 @@ LR_EXE="C:\\Program Files\\Adobe\\Adobe Lightroom Classic\\Lightroom.exe"
 #   headroom for LR + the desktop), floor 6. Override to taste.
 # ---------------------------------------------------------------------------
 LR_MASKING="${LR_MASKING:-auto}"
-FAKERAM_SO="$REPO_DIR/stubs/binaries/fakeram.so"
+FAKERAM_SO="$REPO_DIR/resources/stubs/binaries/fakeram.so"
 export LD_PRELOAD=
 if [ "$LR_MASKING" != off ] && [ -f "$FAKERAM_SO" ]; then
   if [ -z "${FAKERAM_GB:-}" ]; then

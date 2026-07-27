@@ -9,7 +9,8 @@
 #      runtimeclasses that wine only half-implements, so the model never
 #      reaches onnxruntime ("ML model not loaded" / a 0xc0000005 inside
 #      microsoft.ai.machinelearning.dll). We supply them ourselves with a small
-#      in-process WinRT DLL (stubs/winrt_inmemstream.c) providing:
+#      in-process WinRT DLL (resources/stubs/sources/winrt_inmemstream.c)
+#      providing:
 #        - Windows.Storage.Streams.InMemoryRandomAccessStream
 #        - Windows.Storage.Streams.DataWriter
 #        - Windows.Storage.Streams.RandomAccessStreamReference
@@ -35,8 +36,8 @@
 set -uo pipefail
 REPO_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 PREFIX="$REPO_DIR/wineprefix"
-SRC="$REPO_DIR/stubs/sources"
-BIN="$REPO_DIR/stubs/binaries"
+SRC="$REPO_DIR/resources/stubs/sources"
+BIN="$REPO_DIR/resources/stubs/binaries"
 SYS32="$PREFIX/drive_c/windows/system32"
 WINE="${WINE:-wine}"
 
@@ -67,7 +68,7 @@ echo "==> Building fakeram.so"
 if ! gcc -shared -fPIC -O2 -o "$BIN/fakeram.so" "$SRC/fakeram.c" -ldl; then
   echo "  BUILD FAILED (fakeram.so)"; exit 1
 fi
-echo "    built -> stubs/binaries/fakeram.so"
+echo "    built -> resources/stubs/binaries/fakeram.so"
 
 # --- 3. register the three WinRT runtimeclasses -> our DLL --------------------
 # NOTE: these entries do not survive a wine upgrade. The prefix update that runs
