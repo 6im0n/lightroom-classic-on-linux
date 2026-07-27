@@ -51,22 +51,27 @@ this guide's per-script detail still applies; the menu only saves you typing and
 running them in the right order.
 
 ```
-  1) Prepare wine prefix (setup)                    → resources/scripts/wine/setup.sh            (§3)
-  2) Install GPU acceleration (vkd3d-proton)        → resources/scripts/wine/install-vkd3d-proton.sh (§7)
+  --- wine installation ---
+   1) Prepare wine prefix (setup)                   → resources/scripts/wine/setup.sh            (§3)
+   2) Install GPU acceleration (vkd3d-proton)       → resources/scripts/wine/install-vkd3d-proton.sh (§7)
   --- install Lightroom Classic — pick ONE route ---
-  3) via Creative Cloud — online installer  (recommended, bundles CoreSync)
+   3) via Creative Cloud — online installer  (recommended, bundles CoreSync)
                                                     → resources/scripts/creative-cloud/install-creative-cloud-live.sh (§5)
-  4) via Creative Cloud — offline ACCCx.zip         → resources/scripts/creative-cloud/install-creative-cloud.sh (§5)
-  5) via standalone Set-up.exe                      → resources/scripts/lightroom/install-lightroom-classic.sh (§5)
-  6) Post-install fixes                             → resources/scripts/lightroom/install-lightroom-classic-fixes.sh (§6)
+   4) via Creative Cloud — offline ACCCx.zip        → resources/scripts/creative-cloud/install-creative-cloud.sh (§5)
+   5) via standalone Set-up.exe                     → resources/scripts/lightroom/install-lightroom-classic.sh (§5)
+   6) Post-install fixes                            → resources/scripts/lightroom/install-lightroom-classic-fixes.sh (§6)
+   a) Enable AI masking (needs mingw-w64 + gcc)     → resources/scripts/lightroom/install-ai-masking.sh (§6b)
   --- run ---
-  7) Run Lightroom Classic                          → resources/scripts/lightroom/run-lightroom-classic.sh (§8)
-  8) Run Creative Cloud app                         → resources/scripts/creative-cloud/run-creative-cloud.sh
-  g) Add to application menu                        → resources/scripts/lightroom/install-desktop-entry.sh (§8)
+   7) Run Lightroom Classic                         → resources/scripts/lightroom/run-lightroom-classic.sh (§8)
+   8) Run Lightroom Classic — virtual desktop       → same, with --vdesktop (§9, Import fallback)
+   9) Run Creative Cloud app                        → resources/scripts/creative-cloud/run-creative-cloud.sh
+   d) Lightroom UI scale (DPI)                      → sets --dpi= for entries 7 and 8 (§8)
+   g) Add to application menu                       → resources/scripts/lightroom/install-desktop-entry.sh (§8)
   --- other ---
-  9) Set Windows version (win7/win10/win11)         → resources/scripts/wine/set-winver.sh
-  k) Kill the wine session (wineserver -k)          → if an app hangs/won't relaunch
-  r) Reset / wipe the prefix                        → resources/scripts/wine/reset-wineprefix.sh
+  10) Set Windows version (win7/win10/win11)        → resources/scripts/wine/set-winver.sh
+   b) Rebuild the histogram-fix d2d1.dll            → resources/scripts/wine/build-d2d1-lightroom.sh (§3)
+   k) Kill the wine session (wineserver -k)         → if an app hangs/won't relaunch
+   r) Reset / wipe the prefix                       → resources/scripts/wine/reset-wineprefix.sh
 ```
 
 **When something goes wrong, try `k` first.** Adobe's background services
@@ -79,7 +84,7 @@ the DXVK shader cache on disk are untouched. After it, relaunch the app (7 or 8)
 It's the safe "turn it off and on again" before the destructive `r` (reset).
 
 **Typical first run:** `1` → `2` → `5` (standalone, simplest for just Classic) →
-`6` → `7`. If you specifically want the **Creative Cloud desktop app** (Apps
+`6` → `a` (AI masking, optional) → `7`. If you specifically want the **Creative Cloud desktop app** (Apps
 panel, updates, other apps), use `3` instead of `5` — see §5's CC notes for why
 the *online* installer (`3`) is the one that works and the offline `ACCCx.zip`
 (`4`) leaves the panels blank.
@@ -142,6 +147,10 @@ For GPU acceleration (section 7) you'll also need a source of **vkd3d-proton**:
 either `winetricks vkd3d`, or a Proton / GE-Proton runner that bundles it. More
 in section 7.
 
+Keep **both** compilers from the lists above: `mingw-w64` builds the Windows-side
+stubs (`hnetcfg`, the dialog-repaint proxy, the WinRT stream DLL) and native
+`gcc` builds the Linux-side `fakeram.so` used by AI masking (section 6b).
+
 ---
 
 ## 2. Install Wine Staging
@@ -174,18 +183,21 @@ other wine apps.
 Clone this repo, then run the setup script:
 
 ```bash
-git clone https://github.com/sander110419/lightroom-cc-on-linux.git
-cd lightroom-cc-on-linux
+git clone https://github.com/6im0n/lightroom-classic-on-linux.git
+cd lightroom-classic-on-linux
 ./resources/scripts/wine/setup.sh
 ```
 
 `resources/scripts/wine/setup.sh` does the following, idempotently (re-running skips
 already-done steps):
 
-1. Creates `wineprefix/` (`WINEARCH=win64`), boots it, sets the Windows version
-   to 10.
+1. Creates `wineprefix/` (`WINEARCH=win64`) and boots it.
 2. Installs winetricks verbs: `corefonts ucrtbase2019 vcrun2019 msxml6 gdiplus
-   dotnet48 atmlib fontsmooth=rgb dxvk`.
+   dotnet48 atmlib fontsmooth=rgb dxvk`, **then** sets the Windows version to
+   **11** — that order matters, because `dotnet48` resets the prefix back to
+   Windows 7 (build 7601) and the Adobe installer's own OS check needs build
+   ≥ 18362. If `winetricks -q win11` doesn't stick, the script writes the
+   version keys directly and drops any per-prefix winver override.
 3. Downloads Wine Gecko 2.47.4 (x86_64 + x86 MSIs), installs both, and repairs
    the `MSHTML\2.47.4\GeckoPath` registry value to match where the MSI actually
    put the files.
@@ -441,6 +453,57 @@ That's all the post-install steps; the `hnetcfg` stub and the patched
 
 ---
 
+## 6b. AI masking (Select Subject / Sky / Objects)
+
+```bash
+./resources/scripts/lightroom/install-ai-masking.sh     # menu option `a`
+```
+
+Optional but recommended, and idempotent. Without it, an AI mask does nothing
+and the CameraRaw log ends with `*** Error: ML model not loaded ***`.
+
+**Why it's needed.** Adobe runs its masking ONNX models through **WinML**
+(`microsoft.ai.machinelearning` + `onnxruntime`), which feeds each model to
+onnxruntime through `Windows.Storage.Streams` WinRT runtimeclasses. Wine only
+half-implements them, and its async results don't expose **`IAsyncInfo`** —
+WinML calls `get_Status` on them before reading the result, which is the
+`0xc0000005` inside `microsoft.ai.machinelearning.dll`. Separately, onnxruntime
+sizes its CPU inference arena to **total system RAM**, so on a 16 GB box it
+tries to take all of it and OOMs (or freezes your desktop).
+
+**What the script does:**
+
+1. **Builds `winrt_inmemstream.dll`** (mingw-w64, from
+   `resources/stubs/sources/winrt_inmemstream.c`) — an in-process WinRT DLL
+   implementing `InMemoryRandomAccessStream`, `DataWriter` and
+   `RandomAccessStreamReference`, **with `IAsyncInfo` on its async results**, and
+   rewinding the stream in `OpenReadAsync` so WinML reads the whole model.
+   Installs it into `system32`.
+2. **Registers the three runtimeclasses** against it under
+   `HKLM\Software\Microsoft\WindowsRuntime\ActivatableClassId`.
+3. **Builds `fakeram.so`** (native gcc, from
+   `resources/stubs/sources/fakeram.c`) — an `LD_PRELOAD` shim that caps the RAM
+   wine sees (`sysinfo` + `/proc/meminfo`) so the arena stays bounded. The
+   launcher loads it automatically.
+4. **Removes the AMD GPU spoof** from `dxvk.conf` if an earlier run left it
+   there — see the warning in section 7.
+
+Then launch normally and try **Develop > Masking > Select Subject**. Inference
+runs on the **CPU** (Lightroom routes Intel parts to CPU), so expect it to take
+a few seconds per mask.
+
+Launcher knobs (section 8): `LR_MASKING=off` disables the preload,
+`FAKERAM_GB=<N>` overrides the cap (default ≈60 % of real RAM, floor 6 GB).
+
+> **After a wine upgrade**, the prefix update re-points some of those
+> runtimeclasses back at wine's own builtins. The launcher re-asserts all three
+> on every start; re-running this script fixes it too (KNOWN_ISSUES #7).
+
+Full diagnosis trail — including the earlier, wrong "Adobe's models are
+encrypted, dead end" conclusion — is in KNOWN_ISSUES #1.
+
+---
+
 ## 7. GPU acceleration (vkd3d-proton)
 
 ```bash
@@ -471,24 +534,24 @@ order:
    (`…/files/lib/wine/vkd3d-proton/x86_64-windows/`).
 3. Otherwise `winetricks -q vkd3d` (downloads official vkd3d-proton).
 
-### Optional Intel→AMD spoof (OFF by default)
+### Optional Intel→AMD spoof (OFF by default — do not enable it)
 
-The script has an opt-in adapter spoof, gated behind `LR_GPU_SPOOF=1`:
+The script has an opt-in adapter spoof, gated behind `LR_GPU_SPOOF=1`, which
+appends `dxgi.customVendorId/DeviceId/DeviceDesc` ("AMD Radeon RX 6800 XT") to
+`dxvk.conf`. It existed for one reason: Lightroom routes AI Masking inference to
+CPU when it sees an Intel GPU (`Masking AI inference running on CPU: Intel
+parts`), and that CPU path used to fail under wine, so pretending to be AMD
+flipped LR onto the GPU/DirectML path.
 
-```bash
-LR_GPU_SPOOF=1 ./resources/scripts/wine/install-vkd3d-proton.sh
-```
+**That reason is gone** — masking works on the CPU path since section 6b, and
+the spoof is now actively harmful:
 
-It appends `dxgi.customVendorId/DeviceId/DeviceDesc` ("AMD Radeon RX 6800 XT")
-to `dxvk.conf`. Lightroom routes AI Masking inference to CPU when it sees an
-Intel GPU (`Masking AI inference running on CPU: Intel parts`), and that CPU
-path fails under wine; spoofing the adapter as AMD flips LR onto the
-GPU/DirectML path. **It is off by default for two reasons:** (a) AI Masking
-*still* fails afterwards because Adobe's models are encrypted and the
-decrypt-load step is the real wall (not the GPU — see KNOWN_ISSUES), and (b) the
-AMD render path **blanks the Develop/Library histogram** entirely under DXVK.
-For normal use, leave it off: real-Intel + GPU-on gives correct photo colors and
-a (monochrome) histogram.
+- the DirectML/vkd3d masking path it unlocks **hangs the integrated GPU**, and
+- the AMD render path **blanks the Develop/Library histogram** entirely.
+
+Leave it off. `install-ai-masking.sh` strips it out of `dxvk.conf` if an older
+run set it. Real-Intel + GPU-on gives correct photo colours, a properly filled
+histogram (KNOWN_ISSUES #2) and working masking.
 
 ---
 
@@ -501,6 +564,9 @@ a (monochrome) histogram.
 Expected: the Library module loads with your catalog. Click into **Develop** to
 edit; sliders and manual masks apply in real time.
 
+It also accepts two flags: `--vdesktop[=WxH]` (run inside a wine virtual
+desktop — menu option 8) and `--dpi=N` (menu option `d` passes this).
+
 The launcher is self-contained and configurable via env vars:
 
 - **`LR_DPI`** (default `144`) — HiDPI UI scaling, written to the prefix's
@@ -512,6 +578,23 @@ The launcher is self-contained and configurable via env vars:
   EDID/HDR/colorimetry through) but is **experimental**: on GNOME/Mutter +
   wine 11.9 it can fail to start the explorer/window driver and crash LrC. Only
   use it if it works for you.
+- **`LR_KILL_STALE`** (default `1`) — run `wineserver -k` for the prefix before
+  launching and wait for the processes to be reaped. Lightroom aborts on
+  shutdown (`KERNEL32.dll.UnregisterApplicationRecoveryCallback`, KNOWN_ISSUES
+  #5) and leaves processes holding locks that deadlock the next launch. Set
+  `0` only to attach a debugger to a running instance.
+- **`LR_SCREEN_DEPTH`** (default `32`) — writes
+  `HKCU\Software\Wine\AppDefaults\Lightroom.exe\X11 Driver\ScreenDepth`. Pins
+  wine to Xwayland's depth-32 ARGB visual so opening **Import** doesn't abort
+  with `BadMatch`/`X_CopyArea` (§9, KNOWN_ISSUES #8). `0` skips the write,
+  `24` restores wine's default — and the crash.
+- **`LR_MASKING`** (`auto`|`off`, default `auto`) and **`FAKERAM_GB`** — AI
+  masking (§6b). `auto` preloads `fakeram.so` when it's built, capping the RAM
+  wine reports to ≈60 % of real RAM (floor 6 GB) so onnxruntime's arena stays
+  bounded; `FAKERAM_GB=<N>` sets the cap yourself, `off` disables the preload.
+- **`D2D_LAYER_MASK`** (default `1`) — enables the stencil `PushLayer`
+  geometric-mask path in the patched `d2d1.dll`, which is what fills the
+  histogram (KNOWN_ISSUES #2). Set `0` if a layered UI element regresses.
 - **Log suppression** — the launcher silences known-cosmetic channels by
   default: `combase` (WinRT `RoGetActivationFactory` "Failed to find library"),
   `ole` (Adobe-internal CLSIDs not registered), and several UI "unknown msg"
@@ -721,17 +804,26 @@ tiny — raise `LR_DPI` (e.g. `LR_DPI=240`) to compensate.
 Note: this is an X11/graphics-layer abort, not a missing-DLL error — no stub DLL
 (`thumbcache`, `NDFAPI`, etc.) affects it.
 
-### AI Masking / object/subject/background detect / AI Denoise does nothing
+### AI Masking (Select Subject / Sky / Objects) does nothing
 
-This is a known hard limitation, not a misconfiguration. See
-[`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) #1 — Adobe's ML models are encrypted and the
-failure is inside Adobe's proprietary decrypt-then-load step.
+`*** Error: ML model not loaded ***` in the CameraRaw log means the WinRT stream
+DLL isn't in place. Run section 6b (`install-ai-masking.sh`, menu `a`) and
+relaunch. If it worked before and stopped after a **wine upgrade**, the prefix
+update reset the runtimeclass registrations — the launcher normally re-asserts
+them, otherwise re-run the same script (KNOWN_ISSUES #1 and #7). Check what the
+prefix currently has:
 
-### Histogram is grey/monochrome with GPU on
+```bash
+grep -c 'winrt_inmemstream\.dll' wineprefix/system.reg     # expected: 3
+```
 
-Known DXVK 2.7.1 limitation (KNOWN_ISSUES #2). Photo colors are correct. Turn
-GPU off in Preferences > Performance for a full-color histogram at the cost of
-edit speed.
+If instead the desktop **freezes or OOMs** when a mask starts, `fakeram.so`
+isn't being preloaded — onnxruntime then sizes its arena to your total RAM.
+Confirm the launcher prints `==> AI masking: fakeram.so loaded …`, and lower the
+cap by hand if needed (`FAKERAM_GB=8`).
+
+If you enabled the AMD GPU spoof, remove it — it pushes masking onto DirectML,
+which hangs the iGPU (§7).
 
 ### Histogram has coloured outlines but no filled body, with GPU on
 
@@ -757,8 +849,9 @@ CD/DVD burners on Export open. The launcher exports
 override to the prefix registry, so the probe fails fast instead
 (KNOWN_ISSUES #6b).
 
-### Want to debug the ML-masking failure yourself
+### Want to trace the ML-masking path yourself
 
+Useful if masking still misbehaves on your setup after section 6b.
 `resources/scripts/lightroom/debug-lightroom-classic-ml.sh` clears the wine
 session, then launches LrC with the channels that matter for the ML path
 (`+loaddll,+seh,+combase,+ole,+module`), logging to `/tmp/lrc-ml-debug.log`.
