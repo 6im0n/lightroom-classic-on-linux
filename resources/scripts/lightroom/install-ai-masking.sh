@@ -55,7 +55,16 @@ mkdir -p "$BIN"
 
 # --- 1. build the WinRT stream DLL (PE / mingw) ------------------------------
 echo "==> Building winrt_inmemstream.dll"
+# Fedora's mingw64-headers vendors a stale windows.storage.streams.idl that's
+# missing IInputStream, IContentTypeProvider, InputStreamOptions, and the
+# IAsyncOperationWithProgress<IBuffer*,UINT32> generic instantiation this stub
+# needs. wine-staging-devel from WineHQ ships a complete copy (widl-generated
+# for the installed wine runtime itself); use it if present.
+WINE_INC="${WINE_INC:-/opt/wine-staging/include/wine/windows}"
+WINE_INCFLAG=()
+[ -d "$WINE_INC" ] && WINE_INCFLAG=(-I"$WINE_INC")
 if ! x86_64-w64-mingw32-gcc -shared -O2 -Wno-incompatible-pointer-types \
+      "${WINE_INCFLAG[@]}" \
       -o "$BIN/winrt_inmemstream.dll" "$SRC/winrt_inmemstream.c" \
       -lruntimeobject -lole32 -luuid -lwindowsapp; then
   echo "  BUILD FAILED (winrt_inmemstream.dll)"; exit 1
