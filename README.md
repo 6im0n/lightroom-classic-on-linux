@@ -5,7 +5,7 @@ on Linux with Wine.
 
 ![Screenshot](https://github.com/6im0n/lightroom-classic-on-linux/blob/main/resources/ScreenShot/ScreenShot_9.png)
 
-Status as of 2026-07-27 on wine 11.12 staging: install, launch, Develop, GPU
+Status as of 2026-07-27 with lightroom 15.5.1 on wine 11.12 staging: install, launch, Develop, GPU
 acceleration, AI masking and the colour histogram all work. HDR is the only
 missing feature. See [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md).
 
@@ -21,8 +21,8 @@ missing feature. See [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md).
 - GPU acceleration through vkd3d-proton
 - Filled colour histogram, Export and Copy Settings dialogs
 
-HDR does not work: it needs native Wayland and an HDR compositor, and that
-setup crashes Lightroom. AI Denoise has not been tested.
+HDR has not been verified: it needs the native Wayland driver (now the default
+on Wayland sessions) plus an HDR compositor. AI Denoise has not been tested.
 
 ## Requirements
 
@@ -80,8 +80,10 @@ You need one of these:
 | `a`  | Enable AI masking (optional, recommended) |
 | `7`  | Run Lightroom Classic |
 
-Other entries: `g` adds a desktop launcher, `d` changes the UI scale, and `8`
-runs Lightroom in a virtual desktop if the normal launch crashes.
+Other entries: `g` adds a desktop launcher, `d` changes the UI scale, `w`
+switches the graphics driver (Wayland on a Wayland session by default, X11
+otherwise), and `8` runs Lightroom in a virtual desktop if the normal launch
+crashes.
 
 If an app hangs or won't relaunch, pick `k` in the menu (`wineserver -k`). It
 keeps your install.
@@ -101,6 +103,8 @@ keeps your install.
   Lightroom loads at startup.
 - `winrt_inmemstream.dll` and `fakeram.so` make AI masking work.
 - A proxy `version.dll` fixes dialog repaint glitches.
+- With the native Wayland driver, a small preload (`wlstack.so`) keeps menus
+  above the GPU-drawn photo.
 - A `dcomp.dll` built from wine-staging 11.10, used only by Edge WebView2,
   stops the Creative Cloud sign-in page from crash-looping and filling RAM.
   WebView2 also renders through wined3d instead of DXVK (DXVK 3.1 leaked GPU
