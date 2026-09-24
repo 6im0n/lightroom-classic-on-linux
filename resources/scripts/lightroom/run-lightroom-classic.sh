@@ -99,38 +99,75 @@ export DXVK_LOG_LEVEL="${DXVK_LOG_LEVEL:-none}"
 export VKD3D_DEBUG="${VKD3D_DEBUG:-none}"
 
 # ---------------------------------------------------------------------------
-# Graphics driver: Wayland-native vs X11.
-#
-# On a Wayland session, wine's X11 driver runs through Xwayland, which does
-# NOT pass the monitor EDID / HDR.
+# Graphics driver: native Wayland vs X11.
 #
 # LR_DRIVER = auto (default) | wayland | x11
-#   auto: X11 (most compatible; works through Xwayland on Wayland sessions).
-#   wayland: native winewayland.drv — passes EDID/HDR/colorimetry, BUT is
-#     experimental: on GNOME/Mutter + wine 11.9 it can fail to start the
-#     explorer/window driver and crash Lightroom. Only use if it works for you.
-# Force a driver with LR_DRIVER=wayland or LR_DRIVER=x11.
+#   auto:    wayland on a Wayland session (when wine has winewayland.drv),
+#            x11 otherwise (X11 sessions, or no Wayland driver).
+#   wayland: native winewayland.drv. Smoother, follows fractional scaling
+#            itself, and avoids the Preferences freeze that X11 hits under
+#            125%/150% scaling (KNOWN_ISSUES #3). Known glitch: GPU-drawn
+#            panels can paint over parts of open menus.
+#   x11:     wine's X11 driver (through Xwayland on a Wayland session).
+#
+# Without LR_DRIVER, the choice saved by start.sh (menu `w`) in
+# wineprefix/.lr-driver-pref is used, then auto.
+#
+# The driver is fixed when the wine session starts, so switching it restarts
+# the session (a leftover X11 session makes the Wayland one fail with
+# "The explorer process failed to start").
 # ---------------------------------------------------------------------------
-LR_DRIVER="${LR_DRIVER:-auto}"
 PREFIX="$REPO_DIR/wineprefix"
+_why="set by LR_DRIVER"
+if [ -z "${LR_DRIVER:-}" ] && [ -f "$PREFIX/.lr-driver-pref" ]; then
+  LR_DRIVER=$(cat "$PREFIX/.lr-driver-pref"); _why="saved with start.sh option w"
+fi
+LR_DRIVER="${LR_DRIVER:-auto}"
 have_wayland_drv() { ls "$PREFIX"/drive_c/windows/system32/winewayland.drv >/dev/null 2>&1 \
     || ls /usr/lib/wine/*/winewayland.drv >/dev/null 2>&1; }
 
-# Default auto -> X11. It works everywhere; native Wayland is opt-in because
-# it's not yet reliable for LrC here.
-if [ "$LR_DRIVER" = auto ]; then LR_DRIVER=x11; fi
+if [ "$LR_DRIVER" = auto ]; then
+  if [ -n "${WAYLAND_DISPLAY:-}" ] && have_wayland_drv; then
+    LR_DRIVER=wayland; _why="auto: Wayland session"
+  elif [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    LR_DRIVER=x11; _why="auto: Wayland session, but wine has no winewayland.drv"
+  else
+    LR_DRIVER=x11; _why="auto: X11 session"
+  fi
+fi
+case "$LR_DRIVER" in
+  wayland|x11) ;;
+  *) echo "ERROR: LR_DRIVER must be auto, wayland or x11 (got '$LR_DRIVER')" >&2; exit 2 ;;
+esac
+echo "==> graphics driver: $LR_DRIVER ($_why; override with LR_DRIVER=x11|wayland)"
 
+# Write the driver setting first, then restart the session if the driver
+# changed: the `wine reg` call itself starts a session, and one started while
+# the registry still named the old driver can't bring up the new desktop.
 if [ "$LR_DRIVER" = wayland ]; then
-  echo "==> graphics driver: wayland (native)"
-  WINEPREFIX="$PREFIX" WINEDEBUG=-all "${WINE:-wine}" reg ADD 'HKCU\Software\Wine\Drivers' \
-    /v Graphics /t REG_SZ /d "wayland,x11" /f >/dev/null 2>&1 || true
+  _graphics="wayland,x11"
   unset DISPLAY   # let wine pick Wayland via WAYLAND_DISPLAY
 else
-  echo "==> graphics driver: x11"
-  WINEPREFIX="$PREFIX" WINEDEBUG=-all "${WINE:-wine}" reg ADD 'HKCU\Software\Wine\Drivers' \
-    /v Graphics /t REG_SZ /d "x11" /f >/dev/null 2>&1 || true
+  _graphics="x11"
   export DISPLAY="${DISPLAY:-:0}"
 fi
+WINEPREFIX="$PREFIX" WINEDEBUG=-all "${WINE:-wine}" reg ADD 'HKCU\Software\Wine\Drivers' \
+  /v Graphics /t REG_SZ /d "$_graphics" /f >/dev/null 2>&1 || true
+
+_driver_mark="$PREFIX/.lr-driver"
+if [ "$(cat "$_driver_mark" 2>/dev/null)" != "$LR_DRIVER" ]; then
+  echo "==> graphics driver changed; restarting the wine session"
+  WINEPREFIX="$PREFIX" wineserver -k >/dev/null 2>&1 || true
+  WINEPREFIX="$PREFIX" timeout 20 wineserver -w >/dev/null 2>&1 || true
+fi
+echo "$LR_DRIVER" > "$_driver_mark"
+
+# Start wine's desktop process (explorer) before Lightroom does. On a fresh
+# session Lightroom starts several processes at once; under winewayland two of
+# them can race to start the desktop and one fails with "The explorer process
+# failed to start" / "no driver could be loaded". GetDesktopWindow starts the
+# desktop and waits for it, and costs well under a second.
+WINEPREFIX="$PREFIX" WINEDEBUG=-all "${WINE:-wine}" rundll32.exe user32.dll,GetDesktopWindow >/dev/null 2>&1 || true
 
 # ---------------------------------------------------------------------------
 # Import-module crash fix (default) + virtual-desktop fallback.
@@ -200,6 +237,18 @@ if [ "$LR_MASKING" != off ] && [ -f "$FAKERAM_SO" ]; then
   echo "==> AI masking: fakeram.so loaded (RAM reported to wine capped at ${FAKERAM_GB}GB)"
 fi
 
+# wlstack.so (Wayland driver only): wine's Wayland driver pushes menus to the
+# bottom of the window's sub-surface stack, under the GPU-drawn photo and
+# histogram, which then paint over them. The shim drops that one request so
+# menus stay on top. LR_WLSTACK=0 disables it. Source:
+# resources/stubs/sources/wlstack.c
+LR_WLSTACK="${LR_WLSTACK:-1}"
+WLSTACK_SO="$REPO_DIR/resources/stubs/binaries/wlstack.so"
+if [ "$LR_DRIVER" = wayland ] && [ "$LR_WLSTACK" != 0 ] && [ -f "$WLSTACK_SO" ]; then
+  export LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$WLSTACK_SO"
+  echo "==> Wayland menu stacking fix: wlstack.so loaded"
+fi
+
 # ---------------------------------------------------------------------------
 # Keep the WinRT stream classes pointed at our implementation.
 #
@@ -242,6 +291,21 @@ export WINEDEBUG="$WINEDEBUG"
 # PushLayer mask implementation that restores Lightroom's histogram fills.
 # Enabled by default; disable it if a layered UI regression appears:
 #   D2D_LAYER_MASK=0 resources/scripts/lightroom/run-lightroom-classic.sh
+# Keep Lightroom's tips, walkthroughs and feature onboarding turned off. Under
+# the Wayland driver they have frozen Lightroom, and their dimming overlay
+# becomes a separate window that keeps swallowing clicks. disable-tips.sh sets
+# every "...Onboarding..." / "...Walkthrough..." flag in the preferences to
+# true (skipping the inverted "alwaysShow..."-style keys) and adds the known
+# ones when missing. Lightroom only reads the file at start and rewrites it on
+# exit, so it's done here, before launch. A brand-new install has no
+# preferences file until its first run ends. LR_TIPS=1 leaves the file alone.
+if [ "${LR_TIPS:-0}" != 1 ]; then
+  for _prefs in "$PREFIX"/drive_c/users/*/AppData/Roaming/Adobe/Lightroom/Preferences/"Lightroom Classic CC 7 Preferences.agprefs"; do
+    [ -f "$_prefs" ] || continue
+    "$REPO_DIR/resources/scripts/lightroom/disable-tips.sh" "$_prefs" || true
+  done
+fi
+
 export D2D_LAYER_MASK="${D2D_LAYER_MASK:-1}"
 if [ "$D2D_LAYER_MASK" != 0 ]; then
   echo "==> Direct2D geometric-mask layers: enabled"

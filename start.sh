@@ -19,6 +19,18 @@ WINE=${WINE:-wine}
 # default). Applied to runs 7/8 as --dpi=N. Set with menu option 'd'.
 LR_DPI_SET=""
 
+# Graphics driver for Lightroom (menu option 'w'), saved in the prefix so the
+# desktop launcher uses it too: auto | wayland | x11. auto = wayland on a
+# Wayland session, x11 otherwise (run-lightroom-classic.sh decides).
+DRIVER_PREF="$PREFIX/.lr-driver-pref"
+driver_pref() { cat "$DRIVER_PREF" 2>/dev/null || echo auto; }
+driver_label() {
+  local p; p=$(driver_pref)
+  if [ "$p" != auto ]; then echo "$p (forced)"
+  elif [ -n "${WAYLAND_DISPLAY:-}" ]; then echo "wayland (auto: Wayland session)"
+  else echo "x11 (auto: X11 session)"; fi
+}
+
 # --verbose / -v : show the actions' stderr (wine err: lines, traces, etc).
 # Default: stderr is hidden so the menu stays clean (stdout progress still shows).
 VERBOSE=0
@@ -125,6 +137,7 @@ banner() {
   printf '  %b  Lightroom Classic installed\n'  "$(flag "$LR_INSTALLED")"
   printf '  %b  post-install fixes applied\n'   "$(flag "$FIXES_DONE")"
   printf '  %b  AI masking enabled\n'           "$(flag "$MASKING_DONE")"
+  printf "  ${DIM}graphics driver: %s${Z}\n"          "$(driver_label)"
   echo
 }
 
@@ -166,6 +179,7 @@ while true; do
   printf "   8) Run Lightroom Classic ${DIM}— virtual desktop (fallback if something crashes)${Z}\n"
   printf "   9) Run Creative Cloud app          ${DIM}(Win10)${Z}%b\n"  "$(mark runcc)"
   printf "   d) Lightroom UI scale ${DIM}[current: %s]${Z}\n"   "$_dpilbl"
+  printf "   w) Graphics driver ${DIM}[current: %s]${Z}\n"     "$(driver_label)"
   printf "   g) Add to application menu ${DIM}(desktop launcher)${Z}\n"
   echo
   echo "${DIM}  --------------- Other ------------------${Z}"
@@ -236,6 +250,24 @@ while true; do
            echo "  ${G}UI scale: $(dpi_pct "$LR_DPI_SET")% (${LR_DPI_SET} dpi) — applies to runs 7 and 8.${Z}"
            sleep 1.2
          fi ;;
+    w|W) echo; echo "${C}${TRI} Lightroom graphics driver${Z}"; echo
+         echo "  ${DIM}Wayland is smoother and follows fractional scaling; X11 is the fallback.${Z}"
+         echo "    1) auto     ${DIM}(wayland on a Wayland session, x11 otherwise)${Z}"
+         echo "    2) wayland  ${DIM}(native winewayland.drv)${Z}"
+         echo "    3) x11      ${DIM}(through Xwayland on a Wayland session)${Z}"
+         printf '  choose [1-3]: '; read -r _drv
+         case "$_drv" in
+           1) rm -f "$DRIVER_PREF" ;;
+           2) echo wayland > "$DRIVER_PREF" ;;
+           3) echo x11 > "$DRIVER_PREF" ;;
+           *) _drv="" ;;
+         esac
+         if [ -n "$_drv" ]; then
+           echo "  ${G}Graphics driver: $(driver_label) — used by runs 7, 8 and the desktop launcher.${Z}"
+         else
+           echo "  ${Y}Unchanged.${Z}"
+         fi
+         sleep 1.2 ;;
     g|G) if [ "$LR_INSTALLED" = 0 ]; then
            echo "  ${Y}Lightroom Classic is not installed yet.${Z}"; sleep 1.5
          else
