@@ -19,7 +19,9 @@
 #   7. Installs the patched d2d1.dll and mfplat.dll if present in resources/stubs/.
 #
 # Prereqs (see GUIDE.md section 1):
-#   wine 11.8 staging or newer, winetricks 20240105+, mingw-w64, curl, unzip.
+#   wine 11.8 staging or newer, winetricks 20240105+, cabextract, curl.
+#   mingw-w64 is only needed to rebuild the stub DLLs; prebuilt ones ship in
+#   resources/stubs/binaries/.
 
 set -euo pipefail
 
@@ -34,6 +36,20 @@ export WINEARCH=win64
 export WINEDEBUG=${WINEDEBUG:--all,err+all,fixme-all}
 
 mkdir -p "$REPO_DIR/resources/installers" "$REPO_DIR/resources/stubs/binaries" "$REPO_DIR/wineprefix"
+
+# Check the tools up front: winetricks needs cabextract for its very first verb
+# (corefonts), and with `set -e` a missing tool would abort step 2 only after
+# wineboot has already run.
+missing=()
+for tool in "$WINE" "$WINETRICKS" cabextract curl; do
+  command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+done
+if [ "${#missing[@]}" -gt 0 ]; then
+  echo "ERROR: missing required tools: ${missing[*]}" >&2
+  echo "  Install them with your package manager (GUIDE.md section 1 lists the" >&2
+  echo "  package names per distro), then re-run this script." >&2
+  exit 1
+fi
 
 echo "==> Wine: $($WINE --version)"
 echo "==> Prefix: $PREFIX"
