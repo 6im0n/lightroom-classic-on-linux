@@ -4,9 +4,12 @@
 # Outputs to resources/stubs/binaries/:
 #   hnetcfg-stub.dll
 #
-# Idempotent: if the .dll is newer than its .c source, the build is skipped.
+# Idempotent: a .dll is rebuilt only when it's missing or a source was edited
+# after it was built. On a fresh clone the shipped binaries count as up to date.
 #
-# Prereqs: x86_64-w64-mingw32-gcc on PATH.
+# Prereqs: x86_64-w64-mingw32-gcc on PATH, but only when something has to be
+# built. Without it, existing binaries are used as they are (with a warning if
+# a source is newer).
 #   Ubuntu/Debian: sudo apt install mingw-w64
 #   Fedora:        sudo dnf install mingw64-gcc
 #   Arch:          sudo pacman -S mingw-w64-gcc
@@ -23,13 +26,37 @@ mkdir -p "$OUT_DIR"
 CC=${CC:-x86_64-w64-mingw32-gcc}
 CFLAGS="-shared -Wl,--kill-at -nostartfiles -O2 -s"
 
-if ! command -v "$CC" >/dev/null 2>&1; then
-  echo "ERROR: $CC not found on PATH."
+have_cc() { command -v "$CC" >/dev/null 2>&1; }
+
+# stale OUT SRC... : true when OUT is missing or a source is newer than it.
+# Compared in whole seconds with 5 s of slack: a git clone writes binaries/
+# a few milliseconds before sources/, which must not count as "source edited".
+stale() {
+  local out=$1; shift
+  [ -f "$out" ] || return 0
+  local src out_t
+  out_t=$(stat -c %Y "$out")
+  for src in "$@"; do
+    [ "$(stat -c %Y "$src")" -gt $((out_t + 5)) ] && return 0
+  done
+  return 1
+}
+
+# can_build OUT : true if we should compile OUT now. Without a compiler, keep an
+# existing binary (warn) and fail only when there is nothing to fall back on.
+can_build() {
+  local out=$1
+  have_cc && return 0
+  if [ -f "$out" ]; then
+    echo "WARN: $CC not found; keeping the shipped $(basename "$out") (its source is newer)."
+    return 1
+  fi
+  echo "ERROR: $(basename "$out") is missing and $CC is not on PATH."
   echo "  Ubuntu/Debian: sudo apt install mingw-w64"
   echo "  Fedora:        sudo dnf install mingw64-gcc"
   echo "  Arch:          sudo pacman -S mingw-w64-gcc"
   exit 1
-fi
+}
 
 build() {
   local src=$1 out=$2
@@ -37,10 +64,11 @@ build() {
   if [ ! -f "$SRC_DIR/$src" ]; then
     echo "ERROR: $SRC_DIR/$src not found"; exit 1
   fi
-  if [ -f "$OUT_DIR/$out" ] && [ "$OUT_DIR/$out" -nt "$SRC_DIR/$src" ]; then
+  if ! stale "$OUT_DIR/$out" "$SRC_DIR/$src"; then
     echo "==> $out is up to date"
     return
   fi
+  can_build "$OUT_DIR/$out" || return 0
   echo "==> Building $out from $src"
   $CC $CFLAGS -o "$OUT_DIR/$out" "$SRC_DIR/$src" $libs
 }
@@ -60,9 +88,9 @@ build hnetcfg.c         "hnetcfg-stub.dll"                 "-lkernel32 -lole32 -
 PROXY_SRC="$SRC_DIR/fix_ghost.c"
 PROXY_DEF="$SRC_DIR/version-proxy.def"
 PROXY_OUT="$OUT_DIR/version-proxy.dll"
-if [ -f "$PROXY_OUT" ] && [ "$PROXY_OUT" -nt "$PROXY_SRC" ] && [ "$PROXY_OUT" -nt "$PROXY_DEF" ]; then
+if ! stale "$PROXY_OUT" "$PROXY_SRC" "$PROXY_DEF"; then
   echo "==> version-proxy.dll is up to date"
-else
+elif can_build "$PROXY_OUT"; then
   echo "==> Building version-proxy.dll from fix_ghost.c + version-proxy.def"
   $CC -shared -Wl,--kill-at -O2 -s -o "$PROXY_OUT" "$PROXY_SRC" "$PROXY_DEF" -luser32 -lgdi32
 fi
