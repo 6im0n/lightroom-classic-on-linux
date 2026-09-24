@@ -24,7 +24,10 @@
 #      reports (sysinfo + /proc/meminfo) so the arena is bounded. The launcher
 #      sets this up; this script just builds it.
 #
-# Requirements: x86_64-w64-mingw32-gcc (mingw-w64) and gcc.
+# Both binaries ship prebuilt in resources/stubs/binaries/. They are rebuilt
+# only when missing or older than their source, or with MASKING_REBUILD=1;
+# that needs x86_64-w64-mingw32-gcc (mingw-w64) and gcc. Without a compiler
+# the shipped binaries are installed as they are.
 # Idempotent — safe to re-run.
 #
 # NOTE: masking uses the CPU path (it detects an Intel iGPU and runs on CPU).
@@ -43,41 +46,70 @@ WINE="${WINE:-wine}"
 
 echo "==> Lightroom Classic AI-masking enabler"
 
-# --- toolchain checks ---------------------------------------------------------
-miss=0
-command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1 || { echo "  MISSING: x86_64-w64-mingw32-gcc (install mingw-w64)"; miss=1; }
-command -v gcc >/dev/null 2>&1 || { echo "  MISSING: gcc"; miss=1; }
-[ -d "$PREFIX" ] || { echo "  MISSING: wineprefix at $PREFIX (run setup first)"; miss=1; }
-[ -f "$SRC/winrt_inmemstream.c" ] || { echo "  MISSING: $SRC/winrt_inmemstream.c"; miss=1; }
-[ -f "$SRC/fakeram.c" ] || { echo "  MISSING: $SRC/fakeram.c"; miss=1; }
-[ "$miss" = 0 ] || { echo "Aborting — install the missing pieces above."; exit 1; }
+# --- checks -------------------------------------------------------------------
+[ -d "$PREFIX" ] || { echo "  MISSING: wineprefix at $PREFIX (run setup first)"; exit 1; }
 mkdir -p "$BIN"
+MASKING_REBUILD="${MASKING_REBUILD:-0}"
 
-# --- 1. build the WinRT stream DLL (PE / mingw) ------------------------------
-echo "==> Building winrt_inmemstream.dll"
-# Fedora's mingw64-headers vendors a stale windows.storage.streams.idl that's
-# missing IInputStream, IContentTypeProvider, InputStreamOptions, and the
-# IAsyncOperationWithProgress<IBuffer*,UINT32> generic instantiation this stub
-# needs. wine-staging-devel from WineHQ ships a complete copy (widl-generated
-# for the installed wine runtime itself); use it if present.
-WINE_INC="${WINE_INC:-/opt/wine-staging/include/wine/windows}"
-WINE_INCFLAG=()
-[ -d "$WINE_INC" ] && WINE_INCFLAG=(-I"$WINE_INC")
-if ! x86_64-w64-mingw32-gcc -shared -O2 -Wno-incompatible-pointer-types \
-      "${WINE_INCFLAG[@]}" \
-      -o "$BIN/winrt_inmemstream.dll" "$SRC/winrt_inmemstream.c" \
-      -lruntimeobject -lole32 -luuid -lwindowsapp; then
-  echo "  BUILD FAILED (winrt_inmemstream.dll)"; exit 1
+# needs_build OUT SRC : rebuild when forced, when OUT is missing, or when SRC is
+# newer than OUT. Compared in whole seconds with 5 s of slack: a git clone
+# writes binaries/ a few milliseconds before sources/.
+needs_build() {
+  [ "$MASKING_REBUILD" = 1 ] || [ ! -f "$1" ] ||
+    [ "$(stat -c %Y "$2")" -gt $(( $(stat -c %Y "$1") + 5 )) ]
+}
+
+# no_compiler OUT CC : explain what happens when OUT should be built but CC is
+# missing. Keeps a shipped binary; aborts when there is none.
+no_compiler() {
+  if [ -f "$1" ]; then
+    echo "  $2 not found; using the shipped $(basename "$1")"
+  else
+    echo "  MISSING: $(basename "$1") and no $2 to build it (install mingw-w64 / gcc)"
+    exit 1
+  fi
+}
+
+# --- 1. the WinRT stream DLL (PE / mingw) ------------------------------------
+WINRT="$BIN/winrt_inmemstream.dll"
+if ! needs_build "$WINRT" "$SRC/winrt_inmemstream.c"; then
+  echo "==> winrt_inmemstream.dll is up to date"
+elif ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+  no_compiler "$WINRT" x86_64-w64-mingw32-gcc
+else
+  echo "==> Building winrt_inmemstream.dll"
+  # Fedora's mingw64-headers vendors a stale windows.storage.streams.idl that's
+  # missing IInputStream, IContentTypeProvider, InputStreamOptions, and the
+  # IAsyncOperationWithProgress<IBuffer*,UINT32> generic instantiation this stub
+  # needs. wine-staging-devel from WineHQ ships a complete copy (widl-generated
+  # for the installed wine runtime itself); use it if present. On Fedora the
+  # headers can also be unpacked from the WineHQ RPM with rpm2cpio (GUIDE §6b).
+  WINE_INC="${WINE_INC:-/opt/wine-staging/include/wine/windows}"
+  WINE_INCFLAG=()
+  [ -d "$WINE_INC" ] && WINE_INCFLAG=(-I"$WINE_INC")
+  if ! x86_64-w64-mingw32-gcc -shared -O2 -Wno-incompatible-pointer-types \
+        "${WINE_INCFLAG[@]}" \
+        -o "$WINRT" "$SRC/winrt_inmemstream.c" \
+        -lruntimeobject -lole32 -luuid -lwindowsapp; then
+    echo "  BUILD FAILED (winrt_inmemstream.dll)"; exit 1
+  fi
 fi
-cp -f "$BIN/winrt_inmemstream.dll" "$SYS32/winrt_inmemstream.dll"
+cp -f "$WINRT" "$SYS32/winrt_inmemstream.dll"
 echo "    installed -> system32/winrt_inmemstream.dll"
 
-# --- 2. build the fake-RAM shim (ELF / gcc) ----------------------------------
-echo "==> Building fakeram.so"
-if ! gcc -shared -fPIC -O2 -o "$BIN/fakeram.so" "$SRC/fakeram.c" -ldl; then
-  echo "  BUILD FAILED (fakeram.so)"; exit 1
+# --- 2. the fake-RAM shim (ELF / gcc) ----------------------------------------
+FAKERAM="$BIN/fakeram.so"
+if ! needs_build "$FAKERAM" "$SRC/fakeram.c"; then
+  echo "==> fakeram.so is up to date"
+elif ! command -v gcc >/dev/null 2>&1; then
+  no_compiler "$FAKERAM" gcc
+else
+  echo "==> Building fakeram.so"
+  if ! gcc -shared -fPIC -O2 -o "$FAKERAM" "$SRC/fakeram.c" -ldl; then
+    echo "  BUILD FAILED (fakeram.so)"; exit 1
+  fi
+  echo "    built -> resources/stubs/binaries/fakeram.so"
 fi
-echo "    built -> resources/stubs/binaries/fakeram.so"
 
 # --- 3. register the three WinRT runtimeclasses -> our DLL --------------------
 # NOTE: these entries do not survive a wine upgrade. The prefix update that runs

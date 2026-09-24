@@ -158,7 +158,7 @@ while true; do
   printf "   4) via Creative Cloud — offline ACCCx.zip  ${DIM}(back-version;)${Z}\n"
   printf '   5) via standalone Set-up.exe\n'
   printf '   6) Post-install fixes%b\n'                         "$(mark fixes)"
-  printf "   a) Enable AI masking ${DIM}(Select Subject / Sky / Objects — needs mingw-w64 + gcc)${Z}%b\n" "$(mark masking)"
+  printf "   a) Enable AI masking ${DIM}(Select Subject / Sky / Objects)${Z}%b\n" "$(mark masking)"
   echo
   if [ -n "$LR_DPI_SET" ]; then _dpilbl="$(dpi_pct "$LR_DPI_SET")% (${LR_DPI_SET} dpi)"; else _dpilbl="default 150% (144 dpi)"; fi
   echo "${DIM}  -------------- Run apps ---------------------${Z}"
