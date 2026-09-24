@@ -113,6 +113,8 @@ keeps your install.
   the environment variables (`LR_DPI`, `LR_DRIVER`, `LR_MASKING`, …).
 - [`KNOWN_ISSUES.md`](DOCS/KNOWN_ISSUES.md) lists open and solved issues, and what a
   wine upgrade resets.
+- [`APPIMAGE.md`](DOCS/APPIMAGE.md) explains the AppImage (one file with a
+  pinned wine, DXVK and vkd3d-proton) and how to build it.
 
 ### How it works
 

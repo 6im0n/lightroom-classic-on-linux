@@ -108,8 +108,8 @@ install -m 755 "$HERE/AppRun" "$APPDIR/AppRun"
 install -m 755 "$HERE/winetricks-wrapper.sh" "$APPDIR/usr/bin/winetricks"
 
 ICON=lightroom-classic-on-linux
-cp "$HERE/$ICON.svg" "$APPDIR/$ICON.svg"
-ln -sf "$ICON.svg" "$APPDIR/.DirIcon"
+cp "$HERE/$ICON.png" "$APPDIR/$ICON.png"
+ln -sf "$ICON.png" "$APPDIR/.DirIcon"
 cat > "$APPDIR/$ICON.desktop" <<EOF
 [Desktop Entry]
 Type=Application
