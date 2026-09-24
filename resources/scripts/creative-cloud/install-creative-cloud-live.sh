@@ -27,9 +27,9 @@
 #
 # What it does (mirrors install-creative-cloud.sh):
 #   1. Ensures Microsoft Edge WebView2 is installed (the installer UI needs it).
-#   2. Runs the bootstrapper in two phases with a clean wine-session restart
-#      between them (sign-in winver, then install winver) — same flicker / OS
-#      -check workaround the offline route uses.
+#   2. Installs the WebView2 fixes (dcomp, wined3d, per-app win7, shared
+#      msedge.dll) and runs the bootstrapper once under Windows 10: you sign in,
+#      and it downloads + installs the current CC desktop in the same session.
 #   3. Disables the AdobeGrowthSDK copies + HDUWP.dll that crash under wine.
 #   4. Clears the installer's wine session so run-creative-cloud.sh starts clean.
 #
@@ -49,13 +49,23 @@ export DXVK_CONFIG_FILE="$PREFIX/dxvk.conf"
 export WINEDEBUG=${WINEDEBUG:--all,err+all,fixme-all}
 export DISPLAY
 
+# x11cursor.so: WebView2 (sign-in page) runs in another process than the Adobe
+# window it sits in, so wine can't apply its cursor and the pointer vanishes.
+# The shim gives top-level X windows a default arrow. See its source.
+CURSOR_SHIM="$REPO_DIR/resources/stubs/binaries/x11cursor.so"
+[ -f "$CURSOR_SHIM" ] || CURSOR_SHIM=""
+
 # Cap the DXVK present rate (mild anti-flicker throttle). Override DXVK_FRAME_RATE.
 export DXVK_FRAME_RATE="${DXVK_FRAME_RATE:-60}"
 
 # Software-render the Edge WebView2 that draws the installer/login UI (GPU present
 # through DXVK's dummy swapchain flickers on wine/Xwayland). --disable-gpu = CPU
-# render, no flicker. Does NOT fix the invisible login cursor (separate wine
-# pointer bug) — at sign-in just click the email field, type, Tab, type, Enter.
+# render, no flicker.
+# NOTE: Adobe's current bootstrapper no longer picks this variable up (nor the
+# WebView2 AdditionalBrowserArguments policy), so it is kept only for older
+# builds. Flicker, GPU memory and the invisible pointer are now handled by
+# install-dcomp-webview2.sh (per-app win7 + wined3d for msedgewebview2.exe) and
+# the x11cursor.so preload below.
 export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="${WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:---disable-gpu}"
 
 # ---------------------------------------------------------------------------
@@ -84,6 +94,9 @@ if [ -z "$SETUP" ] || [ ! -f "$SETUP" ]; then
   echo "Download 'Creative_Cloud_Set-Up.exe' from"
   echo "  https://creativecloud.adobe.com/apps/download/creative-cloud"
   echo "and drop it in $REPO_DIR/resources/installers/  (or pass its path as an argument)."
+  echo "Adobe's site detects Linux and hides the Windows installer: switch your"
+  echo "browser's user-agent to Windows first (e.g. the User-Agent Switcher extension"
+  echo "  https://addons.mozilla.org/fr/firefox/addon/uaswitcher/ )."
   exit 1
 fi
 echo "==> Using online bootstrapper: $(basename "$SETUP")"
@@ -104,65 +117,44 @@ else
   echo "==> WebView2 already installed"
 fi
 
+# WebView2 (installer + sign-in pages) crash-loops its gpu-process on
+# wine-staging 11.11+'s dcomp and eats all RAM. Give msedgewebview2.exe the
+# pre-11.11 dcomp.dll (native for that exe only). See
+# resources/patches/wine/dcomp-webview2.patch.
+"$REPO_DIR/resources/scripts/wine/install-dcomp-webview2.sh"
+# wine copies msedge.dll (~314 MB, 512-byte file alignment) into every WebView2
+# process; page-align it so all processes share one copy (~3 GB saved).
+"$REPO_DIR/resources/scripts/wine/realign-webview2.sh"
+# CC 6.10 crashes at startup without a WinRT ToastNotificationManager (the
+# installer launches it at the end), so register our stub before running it.
+"$REPO_DIR/resources/scripts/creative-cloud/install-winrt-toast.sh"
+
 # ---------------------------------------------------------------------------
-# 3. Launch the bootstrapper — TWO PHASES with a clean restart
+# 3. Launch the bootstrapper — one session: sign in, then download + install
 # ---------------------------------------------------------------------------
-# Same constraint as the offline route: the WebView2 sign-in page flickers under
-# win11 but is stable under win7; the install/download phase rejects win7's OS
-# version. Switching winver *while* the installer runs deadlocks it
-# ("RtlpWaitForCriticalSection ... retrying (60 sec)"), so we restart the wine
-# session cleanly between phases. Override with CC_LOGIN_WINVER/CC_INSTALL_WINVER.
-CC_LOGIN_WINVER="${CC_LOGIN_WINVER:-win7}"
-CC_INSTALL_WINVER="${CC_INSTALL_WINVER:-win10}"
+# This used to take two phases (sign in under win7 to stop the WebView2 page
+# flickering, then restart the wine session under win10 for the OS check).
+# install-dcomp-webview2.sh now gives msedgewebview2.exe its own win7 version,
+# so the page doesn't flicker while the bootstrapper sees win10 the whole time.
+# Bootstrapper 2.14.0.82+ refuses win7 at startup ("error 21 / Current OS is
+# not supported"), so keep this at win10 or later. Override with CC_WINVER.
+CC_WINVER="${CC_WINVER:-win10}"
 
-echo "==> Phase 1 (sign in): Windows version $CC_LOGIN_WINVER — no flicker on the login page"
-"$REPO_DIR/resources/scripts/wine/set-winver.sh" "$CC_LOGIN_WINVER" >/dev/null 2>&1 || true
-echo "==> Launching the bootstrapper (window on DISPLAY=$DISPLAY) — sign in with your Adobe ID."
-LD_PRELOAD= $WINE "$SETUP" &
-echo
-echo "    ----------------------------------------------------------------"
-echo "    >>> Once you are SIGNED IN, press Enter here. The wine session"
-echo "        restarts under $CC_INSTALL_WINVER so the download/install passes"
-echo "        the OS check, then it fetches the CURRENT CC desktop (CoreSync"
-echo "        bundled)."
-echo "    ----------------------------------------------------------------"
-read -r _ < /dev/tty || true
-
-echo "==> Killing the wine session for a clean version switch (wineserver -k)"
-WINEPREFIX="$PREFIX" wineserver -k 2>/dev/null || true
-pkill -9 -f "$PREFIX" 2>/dev/null || true
-sleep 3
-
-echo "==> Phase 2 (download + install): Windows version $CC_INSTALL_WINVER"
-"$REPO_DIR/resources/scripts/wine/set-winver.sh" "$CC_INSTALL_WINVER" >/dev/null 2>&1 || true
-echo "==> Relaunching the bootstrapper — it resumes with your saved login and"
-echo "    downloads + installs the current Creative Cloud desktop app."
-echo "    This is a network download — give it time."
-LD_PRELOAD= $WINE "$SETUP" || true
+echo "==> Windows version $CC_WINVER"
+"$REPO_DIR/resources/scripts/wine/set-winver.sh" "$CC_WINVER" >/dev/null 2>&1 || true
+echo "==> Launching the bootstrapper (window on DISPLAY=$DISPLAY)."
+echo "    Sign in with your Adobe ID; it then downloads and installs the current"
+echo "    Creative Cloud desktop app. This is a network download — give it time."
+LD_PRELOAD="$CURSOR_SHIM" $WINE "$SETUP" || true
 
 # ---------------------------------------------------------------------------
 # 4. Disable AdobeGrowthSDK + HDUWP (post-install) — same crashers as the
 #    offline route.
 # ---------------------------------------------------------------------------
-# AdobeGrowthSDK.dll / growthsdk.node call kernel32.SetThreadpoolTimerEx, which
-# wine 11.x doesn't implement → "Unhandled exception: unimplemented function
-# KERNEL32.dll.SetThreadpoolTimerEx" aborts the Experience node.exe (the panel
-# host) and the panels die. The ONLINE installer drops these at version-specific
-# paths in BOTH "Program Files" and "Program Files (x86)", so don't hardcode
-# paths — find every copy and disable it. (Re-enable by renaming .disabled back.)
-echo "==> Disabling all AdobeGrowthSDK copies (crash node.exe via SetThreadpoolTimerEx)"
-find "$PREFIX/drive_c" \( -iname 'AdobeGrowthSDK.dll' -o -iname 'growthsdk.node' \) \
-     ! -name '*.disabled' 2>/dev/null | while read -r f; do
-  mv "$f" "$f.disabled" && echo "    disabled: ${f#"$PREFIX/drive_c/"}"
-done
-cd "$PREFIX/drive_c"
-
-echo "==> Disabling HDUWP.dll (UWP installer module; aborts on wine)"
-HDUWP="Program Files (x86)/Common Files/Adobe/Adobe Desktop Common/HDBox/HDUWP.dll"
-if [ -f "$HDUWP" ] && [ ! -f "$HDUWP.disabled" ]; then
-  mv "$HDUWP" "$HDUWP.disabled"
-  echo "    disabled: $HDUWP"
-fi
+# GrowthSDK (SetThreadpoolTimerEx) + HDUWP (PackageFamilyNameFromId) abort
+# under wine; see the helper. run-creative-cloud.sh repeats this on every
+# launch, which matters when the bootstrapper is closed before this step runs.
+"$REPO_DIR/resources/scripts/creative-cloud/disable-cc-crashers.sh"
 
 echo "==> Clearing the installer's wine session (wineserver -k)"
 WINEPREFIX="$PREFIX" wineserver -k 2>/dev/null || true

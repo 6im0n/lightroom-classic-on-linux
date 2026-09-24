@@ -60,15 +60,13 @@ export DXVK_FRAME_RATE="${DXVK_FRAME_RATE:-60}"
 
 # Software-render the WebView2 (Chromium) sign-in/UI: its GPU present through
 # DXVK's dummy composition swapchain fights the compositor on wine/Xwayland and
-# flickers. --disable-gpu = CPU render, no swapchain, no flicker. (Does NOT fix
-# the invisible login cursor — that's a separate wine pointer bug.)
+# flickers. --disable-gpu = CPU render, no swapchain, no flicker.
+# NOTE: Adobe's current bootstrapper no longer picks this variable up (nor the
+# WebView2 AdditionalBrowserArguments policy), so it is kept only for older
+# builds. Flicker, GPU memory and the invisible pointer are now handled by
+# install-dcomp-webview2.sh (per-app win7 + wined3d for msedgewebview2.exe) and
+# the x11cursor.so preload below.
 export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="${WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:---disable-gpu}"
-
-# If signed out, the Adobe login is an Edge WebView2 (Chromium) child window
-# whose cursor is invisible under wine/Xwayland (a wine embedded-window pointer
-# bug — not GPU; --disable-gpu doesn't help, winewayland crashes the app here).
-# The cursor still works: click the email field, type, Tab, type, Enter. It's a
-# one-time sign-in.
 
 # Graphics driver: default X11 (works through Xwayland on Wayland sessions).
 # CC_DRIVER=wayland to try native winewayland (experimental).
@@ -130,8 +128,28 @@ cc_window_up() {
 # Override/extend with CC_CEF_ARGS; user args passed on the command line win last.
 CC_CEF_ARGS="${CC_CEF_ARGS:---disable-gpu --disable-gpu-compositing}"
 
+# CC's sign-in pages run in Edge WebView2, which auto-updates into a new
+# Application/<version>/ folder. Keep its msedge.dll page-aligned so wine shares
+# it across processes instead of copying ~300 MB into each (skips if done).
+"$REPO_DIR/resources/scripts/wine/realign-webview2.sh" || true
+
+# CC reinstalls AdobeGrowthSDK / growthsdk.node when it updates itself, and the
+# install script's cleanup is skipped if the bootstrapper is closed early. They
+# abort the panel host (node.exe) → endless "Initializing Creative Cloud...".
+"$REPO_DIR/resources/scripts/creative-cloud/disable-cc-crashers.sh" || true
+
+# CC 6.10 needs a WinRT ToastNotificationManager at startup (wine has none; it
+# crashes on the missing factory). Re-registered each launch: wine upgrades
+# drop WinRT class registrations.
+"$REPO_DIR/resources/scripts/creative-cloud/install-winrt-toast.sh" || true
+
+# Invisible pointer over the WebView2 sign-in page (cross-process cursor);
+# x11cursor.so gives top-level X windows a default arrow. See its source.
+CURSOR_SHIM="$REPO_DIR/resources/stubs/binaries/x11cursor.so"
+[ -f "$CURSOR_SHIM" ] || CURSOR_SHIM=""
+
 start_cc() {
-  LD_PRELOAD= \
+  LD_PRELOAD="$CURSOR_SHIM" \
   DXVK_CONFIG_FILE="$PREFIX/dxvk.conf" \
   WINEPREFIX="$PREFIX" \
   WINEARCH=win64 \
