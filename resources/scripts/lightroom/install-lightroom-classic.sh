@@ -84,18 +84,9 @@ fi
 # ---------------------------------------------------------------------------
 # 2. Microsoft Edge WebView2 (Adobe installer engine needs it)
 # ---------------------------------------------------------------------------
-WV2_INSTALLER="$REPO_DIR/resources/installers/MicrosoftEdgeWebview2Setup.exe"
-if [ ! -d "$PREFIX/drive_c/Program Files (x86)/Microsoft/EdgeWebView" ]; then
-  if [ ! -f "$WV2_INSTALLER" ]; then
-    echo "==> Downloading MicrosoftEdgeWebview2Setup.exe"
-    curl -L -o "$WV2_INSTALLER" \
-      "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
-  fi
-  echo "==> Installing WebView2 runtime"
-  $WINE "$WV2_INSTALLER" /silent /install || true
-else
-  echo "==> WebView2 already installed"
-fi
+# Uses the offline standalone installer when it's in resources/installers/,
+# otherwise the online bootstrapper (see the helper).
+"$REPO_DIR/resources/scripts/wine/install-webview2.sh"
 
 # ---------------------------------------------------------------------------
 # 3. Launch the Lightroom Classic installer
