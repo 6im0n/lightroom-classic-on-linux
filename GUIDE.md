@@ -66,6 +66,7 @@ running them in the right order.
    8) Run Lightroom Classic — virtual desktop       → same, with --vdesktop (§9, Import fallback)
    9) Run Creative Cloud app                        → resources/scripts/creative-cloud/run-creative-cloud.sh
    d) Lightroom UI scale (DPI)                      → sets --dpi= for entries 7 and 8 (§8)
+   w) Graphics driver (auto / wayland / x11)        → saved in the prefix, used by 7, 8 and the launcher (§8)
    g) Add to application menu                       → resources/scripts/lightroom/install-desktop-entry.sh (§8)
   --- other ---
   10) Set Windows version (win7/win10/win11)        → resources/scripts/wine/set-winver.sh
@@ -617,17 +618,32 @@ The launcher is self-contained and configurable via env vars:
 - **`LR_DPI`** (default `144`) — HiDPI UI scaling, written to the prefix's
   `HKCU\Control Panel\Desktop\LogPixels`. `96`=100%, `120`=125%, `144`=150%,
   `192`=200%. Set `LR_DPI=96` to disable scaling.
-- **`LR_DRIVER`** (`auto`|`x11`|`wayland`, default `auto`→`x11`) — graphics
-  driver. `x11` (through Xwayland on Wayland sessions) is the compatible
-  default. `wayland` uses native `winewayland.drv` (which would pass
-  EDID/HDR/colorimetry through) but is **experimental**: on GNOME/Mutter +
-  wine 11.9 it can fail to start the explorer/window driver and crash LrC. Only
-  use it if it works for you.
+- **`LR_DRIVER`** (`auto`|`wayland`|`x11`, default `auto`) — graphics driver.
+  `auto` picks native `winewayland.drv` on a Wayland session and `x11` on an
+  X11 session (or when wine has no Wayland driver); the launcher prints which
+  one and why. Wayland is smoother and handles fractional scaling itself, which
+  also avoids the Preferences freeze X11 hits at 125%/150% scaling
+  (KNOWN_ISSUES #12). With it the launcher also preloads `wlstack.so`, which
+  keeps menus above the GPU-drawn photo (`LR_WLSTACK=0` turns it off). `x11`
+  goes through Xwayland on a Wayland session. Without
+  `LR_DRIVER`, the choice saved with `start.sh` option `w` is used. Switching
+  drivers restarts the wine session automatically.
 - **`LR_KILL_STALE`** (default `1`) — run `wineserver -k` for the prefix before
   launching and wait for the processes to be reaped. Lightroom aborts on
   shutdown (`KERNEL32.dll.UnregisterApplicationRecoveryCallback`, KNOWN_ISSUES
   #5) and leaves processes holding locks that deadlock the next launch. Set
   `0` only to attach a debugger to a running instance.
+- **`LR_TIPS`** (default `0`) — before each launch,
+  `resources/scripts/lightroom/disable-tips.sh` (plain awk) keeps tips, walkthroughs and
+  feature onboarding off; they have frozen Lightroom under the Wayland driver.
+  It sets every preference whose name contains "Onboarding" or "Walkthrough"
+  (any case) from `false` to `true`, so flags added by future Lightroom
+  versions are covered too, and adds the known ones (`AgTipsDlg_TurnOffTips`,
+  the per-module `…_Showed_Walkthroughs`, …) when missing. Keys that also
+  contain "always", "should", "enable" or "force" are left alone, because
+  `true` would turn onboarding on for them. The file is
+  `wineprefix/drive_c/users/<you>/AppData/Roaming/Adobe/Lightroom/Preferences/Lightroom Classic CC 7 Preferences.agprefs`;
+  a new install only has it after its first run. Set `1` to keep the tips.
 - **`LR_KILL_ON_EXIT`** (default `1`) — once Lightroom exits, stop the prefix's
   wine session (`wineserver -k`, then wait for it). Otherwise wineserver,
   services.exe, rpcss, plugplay, lsass and WebView2's `MicrosoftEdgeUpdate.exe`
@@ -780,11 +796,13 @@ wine's fake builtin d3d12 is still in place. Run
 `./resources/scripts/wine/install-vkd3d-proton.sh` to drop in vkd3d-proton's real D3D12, then
 relaunch.
 
-### After a failed Wayland (`LR_DRIVER=wayland`) attempt, LrC won't relaunch
+### "The explorer process failed to start" / "no driver could be loaded"
 
-A crashed Wayland attempt can leave a stale wineserver in mixed driver state
-(symptoms include a `KERNEL32.dll.UnregisterApplicationRecoveryCallback` abort).
-Kill it before relaunching on X11:
+The launcher restarts the wine session when the graphics driver changes and
+starts wine's desktop process before Lightroom, which covers the known causes
+(a leftover session from the other driver, and Lightroom's processes racing to
+start the Wayland desktop). If it still happens, for example after a crash,
+kill the session and relaunch:
 
 ```bash
 WINEPREFIX=$PWD/wineprefix wineserver -k

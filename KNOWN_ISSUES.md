@@ -136,10 +136,10 @@ GPU on and the histogram fills correctly.
 ## 3. HDR is not available
 
 If your display panel is HDR-capable, but HDR editing in LrC needs native `winewayland.drv` **plus**
-compositor HDR. On this GNOME / Mutter + wine 11.9 combination, the native
-Wayland driver crashes LrC (`nodrv_CreateWindow` "explorer process failed to
-start" + a page fault), so the default `LR_DRIVER=x11` path is used — and X11 /
-Xwayland can't pass the monitor EDID / HDR through. Net: no HDR.
+compositor HDR. Since wine 11.18 the native Wayland driver runs Lightroom here
+and is the default on Wayland sessions (#12), but HDR through it has not been
+verified yet. On the X11 path (Xwayland) the monitor EDID / HDR can't reach
+wine at all.
 
 The blank-colorimetry log lines you may see are cosmetic for SDR work (Lightroom
 uses sRGB / ICC color management). The launcher silences them by default.
@@ -437,6 +437,64 @@ Two separate causes, both handled by `run-creative-cloud.sh` on every launch:
   `AdobeGrowthSDK.dll` / `growthsdk.node` / `HDUWP.dll` after Adobe's
   bootstrapper exits, and CC reinstalls them when it updates. They abort the
   panel host (`node.exe`). `disable-cc-crashers.sh` now runs before every launch.
+
+## 12. Graphics driver: Wayland by default, X11 as fallback
+
+On a Wayland session the launcher now uses wine's native Wayland driver
+(`LR_DRIVER=auto`). With wine 11.18 it starts Lightroom reliably and feels
+smoother than X11 through Xwayland. X11 sessions keep the X11 driver. `start.sh`
+option `w` (or `LR_DRIVER=x11|wayland`) switches it.
+
+Why not X11 everywhere: under **fractional scaling** (125%, 150%...) on a
+Wayland session, **Edit > Preferences freezes Lightroom** with the X11 driver.
+The dialog has a fixed size (for example 1374×1229); the compositor sizes X11
+windows in whole logical pixels, so at 125% the height becomes 1230. Lightroom
+resizes it back, the compositor rounds it again, and the main thread spins in
+`SetWindowPos` forever (its hang monitor logs `main thread pulse not
+received`). The Wayland driver handles the scale itself and doesn't loop. On
+X11 the workarounds are the virtual desktop (menu `8`), an integer scale
+(100%/200%), or the compositor's "let X11 apps scale themselves" option
+(GNOME: `xwayland-native-scaling`; KDE: "Apply scaling themselves").
+
+Menus drawn under the photo (fixed): wine's Wayland driver makes Lightroom's
+GPU-drawn areas (the photo, the histogram) and its menus sub-surfaces of the
+main window, and places each menu directly above the main window, which is the
+bottom of the stack. The photo then painted over any menu overlapping it
+(`wayland_surface_reconfigure_subsurface` in `dlls/winewayland.drv`, still the
+same in wine master). `resources/stubs/binaries/wlstack.so`
+(`resources/stubs/sources/wlstack.c`), preloaded by the launcher with the
+Wayland driver, drops that one "place above the parent" request. New
+sub-surfaces start at the top of the stack, so menus stay above the GPU
+surfaces. `LR_WLSTACK=0` turns it off.
+
+Tips and walkthroughs: once, a tip popping up froze Lightroom under Wayland
+(main thread blocked). It didn't happen again in later runs, but the launcher
+now keeps tips off (`LR_TIPS`, GUIDE §8): every "…Onboarding…" /
+"…Walkthrough…" preference is set to `true`, the same state Lightroom saves
+when you tick "Turn off tips" or finish a walkthrough. Their dimming overlay is
+a separate top-level window under Wayland, which is why, when a walkthrough
+did show, clicks stayed blocked after it closed. The "What's New" screen can't
+be turned off this way: Lightroom resets `shouldShowWhatsNew` itself.
+
+Two things the launcher handles for Wayland: switching drivers restarts the
+wine session, and wine's desktop process is started before Lightroom, because
+Lightroom's first processes otherwise race to start it and one fails with
+"The explorer process failed to start".
+
+## 13. Map module freezes Lightroom (open)
+
+Opening **Map** starts Lightroom's embedded Chromium (`Adobe Lightroom CEF
+Helper.exe`) and Lightroom stops responding. With the Wayland driver the main
+thread spins in wine's input-method code (`WM_IME_NOTIFY` →
+`NtUserQueryInputContext`, tens of thousands of calls a second). Hiding the
+compositor's text-input protocol from wine stops that loop, but then
+`Lightroom.exe` grows past 5 GB plus several GB of GPU buffers until RAM runs
+out, and the map still doesn't load. It has not been tested with the X11 driver
+yet, so it may not be specific to Wayland.
+
+Avoid the Map module for now. To hide it from the module bar, right-click the
+module names (Library, Develop, Map…) and untick Map. If Lightroom freezes
+there, use `start.sh` option `k` to stop the wine session.
 
 ---
 
