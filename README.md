@@ -5,7 +5,7 @@ on Linux with Wine.
 
 ![Screenshot](screenshots/ScreenShot_9.png)
 
-Status as of 2026-07-27 with lightroom 15.5.1 on wine 11.12 staging: install, launch, Develop, GPU
+Status as of 2026-09-25 with lightroom 15.5.1 on wine 11.18 staging: install, launch, Develop, GPU
 acceleration, AI masking and the colour histogram all work. HDR is the only
 missing feature. See [`KNOWN_ISSUES.md`](DOCS/KNOWN_ISSUES.md).
 
