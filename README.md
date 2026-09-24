@@ -3,11 +3,11 @@
 Run Adobe Lightroom Classic (the local-catalog desktop app, not Lightroom CC)
 on Linux with Wine.
 
-![Screenshot](https://github.com/6im0n/lightroom-classic-on-linux/blob/main/resources/ScreenShot/ScreenShot_9.png)
+![Screenshot](screenshots/ScreenShot_9.png)
 
 Status as of 2026-07-27 with lightroom 15.5.1 on wine 11.12 staging: install, launch, Develop, GPU
 acceleration, AI masking and the colour histogram all work. HDR is the only
-missing feature. See [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md).
+missing feature. See [`KNOWN_ISSUES.md`](DOCS/KNOWN_ISSUES.md).
 
 > Thanks to [sander110419](https://github.com/sander110419) for the original
 > Lightroom-cc-on-linux idea and the patched DLLs (`mfplat`, `d2d1`, `hnetcfg`)
@@ -90,9 +90,9 @@ keeps your install.
 
 ## Learn more
 
-- [`GUIDE.md`](GUIDE.md) explains every script and fix, the manual steps, and
+- [`GUIDE.md`](DOCS/GUIDE.md) explains every script and fix, the manual steps, and
   the environment variables (`LR_DPI`, `LR_DRIVER`, `LR_MASKING`, …).
-- [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) lists open and solved issues, and what a
+- [`KNOWN_ISSUES.md`](DOCS/KNOWN_ISSUES.md) lists open and solved issues, and what a
   wine upgrade resets.
 
 ### How it works

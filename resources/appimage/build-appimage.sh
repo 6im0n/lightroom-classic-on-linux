@@ -80,7 +80,7 @@ mkdir -p "$APPDIR/app" "$APPDIR/usr/bin"
 # 1. app/ — tracked files only (no wineprefix, installers, logs, screenshots)
 # ---------------------------------------------------------------------------
 echo "==> Copying the scripts"
-git ls-files -z -- start.sh README.md GUIDE.md KNOWN_ISSUES.md LICENSE \
+git ls-files -z -- start.sh README.md LICENSE DOCS \
     resources/scripts resources/stubs resources/patches |
   xargs -0 cp --parents -a -t "$APPDIR/app/"
 # One mtime for everything. build-stubs.sh / install-ai-masking.sh rebuild a

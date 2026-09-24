@@ -3,7 +3,7 @@
 #
 # AppDir layout (built by the AppImage build script):
 #   AppRun                   this file
-#   app/                     the repo: start.sh, resources/{scripts,stubs,patches}, docs
+#   app/                     the repo: start.sh, resources/{scripts,stubs,patches}, DOCS/
 #   deps/                    pinned wine, DXVK, vkd3d-proton, winetricks, gecko (fetch-deps.sh)
 #   usr/bin/winetricks       winetricks-wrapper.sh (pins the dxvk / vkd3d verbs)
 #
@@ -85,11 +85,11 @@ stage_home() {
   mkdir -p "$LR_HOME/resources/installers" "$LR_HOME/logs"
   # Code only: replaced wholesale. User data (wineprefix/, installers/, logs/)
   # is never in this list.
-  for p in resources/scripts resources/stubs resources/patches; do
+  for p in resources/scripts resources/stubs resources/patches DOCS; do
     rm -rf "${LR_HOME:?}/$p"
     cp -a "$APPDIR/app/$p" "$LR_HOME/$p"
   done
-  for f in start.sh README.md GUIDE.md KNOWN_ISSUES.md LICENSE; do
+  for f in start.sh README.md LICENSE; do
     [ -f "$APPDIR/app/$f" ] && cp -a "$APPDIR/app/$f" "$LR_HOME/$f"
   done
   # setup.sh installs Wine Gecko from resources/installers/gecko/ and only
