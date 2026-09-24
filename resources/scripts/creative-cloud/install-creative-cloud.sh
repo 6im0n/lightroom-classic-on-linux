@@ -53,6 +53,12 @@ export DXVK_CONFIG_FILE="$PREFIX/dxvk.conf"
 export WINEDEBUG=${WINEDEBUG:--all,err+all,fixme-all}
 export DISPLAY
 
+# x11cursor.so: WebView2 (sign-in page) runs in another process than the Adobe
+# window it sits in, so wine can't apply its cursor and the pointer vanishes.
+# The shim gives top-level X windows a default arrow. See its source.
+CURSOR_SHIM="$REPO_DIR/resources/stubs/binaries/x11cursor.so"
+[ -f "$CURSOR_SHIM" ] || CURSOR_SHIM=""
+
 # Cap the DXVK present rate (mild anti-flicker throttle). Override DXVK_FRAME_RATE.
 export DXVK_FRAME_RATE="${DXVK_FRAME_RATE:-60}"
 
@@ -62,14 +68,12 @@ export DXVK_FRAME_RATE="${DXVK_FRAME_RATE:-60}"
 # the installer window flicker badly. --disable-gpu drops WebView2 to CPU
 # rendering: no swapchain, no flicker. WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS is
 # read by the WebView2 runtime. Override/clear it if you want GPU rendering back.
+# NOTE: Adobe's current bootstrapper no longer picks this variable up (nor the
+# WebView2 AdditionalBrowserArguments policy), so it is kept only for older
+# builds. Flicker, GPU memory and the invisible pointer are now handled by
+# install-dcomp-webview2.sh (per-app win7 + wined3d for msedgewebview2.exe) and
+# the x11cursor.so preload below.
 export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="${WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:---disable-gpu}"
-
-# NOTE on the invisible cursor at sign-in: separately, the login page's embedded
-# WebView2 child window doesn't get pointer events under wine/Xwayland, so the
-# cursor is invisible over the login box (it returns once the native CC UI takes
-# over after sign-in; --disable-gpu above does NOT fix the cursor, and native
-# winewayland crashes the Adobe apps on GNOME here). The cursor still WORKS —
-# click the email field, type, Tab to password, type, Enter. One-time sign-in.
 
 # ---------------------------------------------------------------------------
 # 0. The prefix must already be set up
@@ -86,7 +90,7 @@ fi
 ZIP=$(ls "$REPO_DIR"/resources/installers/ACCCx*.zip 2>/dev/null | head -n1 || true)
 if [ -z "$ZIP" ]; then
   echo "ERROR: no resources/installers/ACCCx*.zip found."
-  echo "Download it from https://creativecloud.adobe.com/apps/download/creative-cloud"
+  echo "Download it from https://helpx.adobe.com/download-install/apps/download-install-apps/creative-cloud-apps/download-creative-cloud-desktop-app-using-direct-links.html"
   echo "and drop it in $REPO_DIR/resources/installers/"
   exit 1
 fi
@@ -119,6 +123,18 @@ else
   echo "==> WebView2 already installed"
 fi
 
+# WebView2 (installer + sign-in pages) crash-loops its gpu-process on
+# wine-staging 11.11+'s dcomp and eats all RAM. Give msedgewebview2.exe the
+# pre-11.11 dcomp.dll (native for that exe only). See
+# resources/patches/wine/dcomp-webview2.patch.
+"$REPO_DIR/resources/scripts/wine/install-dcomp-webview2.sh"
+# wine copies msedge.dll (~314 MB, 512-byte file alignment) into every WebView2
+# process; page-align it so all processes share one copy (~3 GB saved).
+"$REPO_DIR/resources/scripts/wine/realign-webview2.sh"
+# CC 6.10 crashes at startup without a WinRT ToastNotificationManager (the
+# installer launches it at the end), so register our stub before running it.
+"$REPO_DIR/resources/scripts/creative-cloud/install-winrt-toast.sh"
+
 # ---------------------------------------------------------------------------
 # 3. Launch the Adobe Creative Cloud installer — TWO PHASES with a clean restart
 # ---------------------------------------------------------------------------
@@ -139,7 +155,7 @@ CC_INSTALL_WINVER="${CC_INSTALL_WINVER:-win10}"
 echo "==> Phase 1 (sign in): Windows version $CC_LOGIN_WINVER — no flicker on the login page"
 "$REPO_DIR/resources/scripts/wine/set-winver.sh" "$CC_LOGIN_WINVER" >/dev/null 2>&1 || true
 echo "==> Launching Set-up.exe (window on DISPLAY=$DISPLAY) — sign in with your Adobe ID."
-LD_PRELOAD= $WINE "$SETUP" &
+LD_PRELOAD="$CURSOR_SHIM" $WINE "$SETUP" &
 echo
 echo "    ----------------------------------------------------------------"
 echo "    >>> Once you are SIGNED IN, press Enter here. The wine session"
@@ -157,36 +173,14 @@ echo "==> Phase 2 (install): Windows version $CC_INSTALL_WINVER"
 "$REPO_DIR/resources/scripts/wine/set-winver.sh" "$CC_INSTALL_WINVER" >/dev/null 2>&1 || true
 echo "==> Relaunching Set-up.exe — it resumes with your saved login."
 echo "    Let it install the Creative Cloud app; then Apps panel > Install Lightroom Classic."
-LD_PRELOAD= $WINE "$SETUP" || true
+LD_PRELOAD="$CURSOR_SHIM" $WINE "$SETUP" || true
 
 # ---------------------------------------------------------------------------
-# 4. Disable AdobeGrowthSDK (post-install)
+# 4. Disable AdobeGrowthSDK + HDUWP (post-install)
 # ---------------------------------------------------------------------------
-echo "==> Disabling AdobeGrowthSDK copies bundled with the CC desktop app"
-cd "$PREFIX/drive_c"
-for f in \
-  "Program Files/Common Files/Adobe/Adobe Desktop Common/GrowthSDK/AdobeGrowthSDK.dll" \
-  "Program Files/Adobe/Adobe Creative Cloud Experience/js/node_modules/@growthsdk/growthsdk/public/binaries/win.x64/Release/AdobeGrowthSDK.dll" \
-  "Program Files/Adobe/Adobe Creative Cloud Experience/js/node_modules/@growthsdk/growthsdk/public/binaries/win.x64/Release/growthsdk.node"; do
-  if [ -f "$f" ] && [ ! -f "$f.disabled" ]; then
-    mv "$f" "$f.disabled"
-    echo "    disabled: $f"
-  fi
-done
-
-# HDUWP.dll is the HD installer's UWP/packaged-app module. It statically imports
-# kernel32.PackageFamilyNameFromId, which wine 11.x only has as an aborting stub
-# — so when Adobe Installer.exe loads HDUWP during an app install it dies with
-# "Call ... to unimplemented function KERNEL32.dll.PackageFamilyNameFromId,
-# aborting", and the Lightroom Classic install fails. LR Classic is a plain
-# Win32 app, so the UWP module isn't needed: disabling it makes the installer
-# skip that path and complete. (Re-enable by renaming the .disabled file back.)
-echo "==> Disabling HDUWP.dll (UWP installer module; aborts on wine)"
-HDUWP="Program Files (x86)/Common Files/Adobe/Adobe Desktop Common/HDBox/HDUWP.dll"
-if [ -f "$HDUWP" ] && [ ! -f "$HDUWP.disabled" ]; then
-  mv "$HDUWP" "$HDUWP.disabled"
-  echo "    disabled: $HDUWP"
-fi
+# GrowthSDK (SetThreadpoolTimerEx) + HDUWP (PackageFamilyNameFromId) abort
+# under wine; see the helper. run-creative-cloud.sh repeats this on every launch.
+"$REPO_DIR/resources/scripts/creative-cloud/disable-cc-crashers.sh"
 
 # Clear the wine session left over by the installer. Adobe's background services
 # (Adobe Desktop Service, AdobeIPCBroker, CoreSync, Creative Cloud Helper) keep
