@@ -7,7 +7,7 @@ module, manual edits, GPU acceleration, **AI masking** and the **filled
 histogram** all work now.
 
 Entries #1 (AI masking), #2 (histogram fill), #6 (dialog ghosting), #6b (Export
-freeze) and #8 (Import crash) are **fixed** and kept here for the diagnosis
+freeze), #8 (Import crash), #9 (CC installer RAM), #10 (CC sign-in page) and #11 (CC app startup crash) are **fixed** and kept here for the diagnosis
 trail — what the real cause turned out to be, and which script applies the fix.
 Only **HDR** (#3) is still a hard limitation; the rest is log noise (#4) and
 maintenance you need to know about (#5 stale wineserver, #7 wine upgrades).
@@ -369,6 +369,68 @@ written by the launcher on every start. Full detail in GUIDE §9.
 The `WINE_X11_NO_MITSHM=1` workaround previously documented here and in the
 GUIDE **never did anything** — wine has no such variable (wine bug 43893 was
 never implemented; the string does not exist in the wine 11.12 binaries).
+
+## 9. Creative Cloud installer eats all RAM (FIXED)
+
+On wine-staging 11.11+ the CC installer's sign-in page (Edge WebView2) climbed
+past 15 GB of RAM within a minute. Its gpu-process crashed every ~4 s
+(`0x80000003` in `msedge.dll`, one crash dump per restart). The cause is
+wine-staging's dcomp patchset: patch 0067 "Allow IDCompositionDevice3
+interface" (2026-06-08) makes Chromium take its DirectComposition path, which
+then aborts on the stubbed `IDCompositionVisual::SetClipObject`. Every restart
+maps another private ~300 MB copy of `msedge.dll`.
+
+Not the cause (all tested): wine 11.12 vs 11.17/11.18, WebView2 149 vs 153,
+Windows 7 vs 10, GPU flags, DXVK vs wined3d, transparent hugepages.
+
+Fixed by giving `msedgewebview2.exe` a dcomp.dll built from wine-staging
+11.10's patchset (GUIDE §3, "The WebView2 `dcomp.dll`").
+
+With the crash loop gone, a slower leak showed up: under DXVK 3.1 the WebView2
+gpu-process kept allocating GPU buffers (~400 MB/s of shared memory, 16 GB in
+under a minute). `install-dcomp-webview2.sh` also switches WebView2 alone to
+wined3d, which keeps it flat.
+
+A second, steady cost: wine gave every WebView2 process its own ~300 MB copy of
+`msedge.dll` (512-byte file alignment can't be memory-mapped), about 3 GB in
+total. `realign-webview2.sh` page-aligns the DLL so the processes share it.
+
+After a wine upgrade, check for leftover processes from the old wine version
+(`ps aux | grep 'C:\\windows'`): the new `wineserver -k` can't reach them, and
+a stale session held ~10 GB of GPU memory during this investigation.
+
+## 10. Creative Cloud sign-in page: flicker and pointer
+
+The WebView2 sign-in page used to flicker constantly and hide the mouse
+pointer.
+
+- **Flicker: fixed.** `install-dcomp-webview2.sh` makes `msedgewebview2.exe`
+  alone report Windows 7 (per-app `Version`), which avoids Chromium's
+  flickering Windows 8+ presentation path. Adobe's installer keeps Windows 10,
+  which it needs to avoid error 21.
+- **Invisible pointer: worked around.** WebView2 runs in a different process
+  than the Adobe window around it, and wine can't apply a cursor from another
+  process ("icon handle ... from other process"). The window was left with
+  wine's blank cursor. `resources/stubs/binaries/x11cursor.so`, preloaded by the
+  CC scripts, swaps that blank cursor for an arrow. The pointer stays an arrow
+  over text fields and links.
+
+## 11. Creative Cloud app stuck on "Initializing", then crashes (FIXED)
+
+Two separate causes, both handled by `run-creative-cloud.sh` on every launch:
+
+- **Missing toast notifications.** Creative Cloud 6.10 asks for the WinRT
+  `Windows.UI.Notifications.ToastNotificationManager` at startup. wine has no
+  implementation, so `RoGetActivationFactory` fails with `REGDB_E_CLASSNOTREG`
+  and `Creative Cloud.exe` dereferences the NULL factory (access violation at
+  `Creative Cloud.exe+0x65f9e`). `winrt_toast.dll`
+  (`resources/stubs/sources/winrt_toast.c`, installed by
+  `install-winrt-toast.sh`) provides the factory and reports notifications as
+  disabled.
+- **GrowthSDK back in place.** The install script only disables
+  `AdobeGrowthSDK.dll` / `growthsdk.node` / `HDUWP.dll` after Adobe's
+  bootstrapper exits, and CC reinstalls them when it updates. They abort the
+  panel host (`node.exe`). `disable-cc-crashers.sh` now runs before every launch.
 
 ---
 

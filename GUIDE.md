@@ -272,6 +272,41 @@ builtin PE marker, and writes
 source but is what runs here on Wine 11.12; rebuild it if Direct2D misbehaves
 after a Wine upgrade (`start.sh` option `b`).
 
+### The WebView2 `dcomp.dll`
+
+Only needed for the Creative Cloud routes (menu 3/4). Edge WebView2 draws the
+CC installer and sign-in pages. On wine-staging 11.11+, staging's DirectComposition
+(`dcomp.dll`) answers `IDCompositionDevice3`, so WebView2 149+ takes its
+DirectComposition path and its gpu-process aborts on a stubbed
+`IDCompositionVisual::SetClipObject` (`E_NOTIMPL`). It restarts every ~4 s,
+each restart maps another private ~300 MB copy of `msedge.dll`, and RAM runs
+away until the machine stalls.
+
+The fix is wine-staging **11.10**'s dcomp patchset (before that interface was
+enabled), built from the same pinned Wine 11.10 source as `d2d1.dll`:
+`resources/patches/wine/dcomp-webview2.patch` →
+`resources/stubs/binaries/dcomp-webview2.dll`. Both CC install scripts run
+`resources/scripts/wine/install-dcomp-webview2.sh`, which copies it into
+system32 and sets `dcomp=native` for **`msedgewebview2.exe` only**
+(`HKCU\Software\Wine\AppDefaults\msedgewebview2.exe\DllOverrides`); every
+other program keeps wine's builtin. The same key pins `d3d11`, `dxgi` and
+`d3d10core` to wine's builtin (wined3d) for WebView2 only: under DXVK 3.1 its
+gpu-process leaks GPU buffers at ~400 MB/s (on an Intel iGPU that's system
+RAM), while with wined3d memory stays flat. To rebuild the DLL:
+
+```bash
+resources/scripts/wine/build-dcomp-webview2.sh --install
+```
+
+The same scripts (and `run-creative-cloud.sh`, since WebView2 auto-updates into
+a new folder) also run `resources/scripts/wine/realign-webview2.sh`.
+`msedge.dll` is 314 MB with 512-byte file alignment, and wine can only share a
+DLL between processes when its sections sit at page-aligned file offsets;
+otherwise every process gets a private copy. The installer runs ~10-12 WebView2
+processes, so that cost ~3 GB. `resources/scripts/stubs/pe_realign.py`
+rewrites the DLL with 4 KB alignment (original kept as `msedge.dll.orig`), and
+each process then keeps only ~26 MB private.
+
 ### The patched `mfplat.dll`
 
 Adobe media code paths delay-load `MFCreateSampleCopierMFT` from `mfplat.dll`,
@@ -362,14 +397,21 @@ routes — and which one you pick decides whether the app's panels actually work
 
 Download the small online bootstrapper **`Creative_Cloud_Set-Up.exe`** from
 <https://creativecloud.adobe.com/apps/download/creative-cloud>, drop it in
-`resources/installers/`, then:
+`resources/installers/`, then run the script below. Adobe's site detects Linux
+and hides the Windows download, so switch your browser's user-agent to Windows
+first (for example with the
+[User-Agent Switcher](https://addons.mozilla.org/fr/firefox/addon/uaswitcher/)
+Firefox extension).
 
 ```bash
 ./resources/scripts/creative-cloud/install-creative-cloud-live.sh
 ```
 
-It installs WebView2, then runs the bootstrapper in two phases (sign in, then a
-clean wine-session restart to pass the OS check) and downloads the **current**
+It installs WebView2 plus the WebView2 `dcomp.dll` (see
+[The WebView2 `dcomp.dll`](#the-webview2-dcompdll)), then runs the bootstrapper
+once under Windows 10 (2.14.0.82+ refuses Windows 7 at startup with
+**error 21**, "Current OS is not supported"): you sign in and it downloads the
+**current**
 CC desktop app. The current build ships **CoreSync** (which provides
 `CoreSync.exe` and `CCXProcess.exe`, the processes that render the Home / Apps /
 Files / Fonts panels), so the panels work. After install it disables every
@@ -378,7 +420,9 @@ Files / Fonts panels), so the panels work. After install it disables every
 
 #### Back-version: the OFFLINE `ACCCx*.zip` (`install-creative-cloud.sh`, menu 4)
 
-The offline `ACCCx*.zip` from the same page is a **back-version**. It installs
+The offline `ACCCx*.zip` (from Adobe's
+[direct download links page](https://helpx.adobe.com/download-install/apps/download-install-apps/creative-cloud-apps/download-creative-cloud-desktop-app-using-direct-links.html))
+is a **back-version**. It installs
 the CC core but then wants a self-update before it will install CoreSync — and
 under wine that self-update sits behind a "click Update Now" bar that needs a
 panel applet to render, which needs CoreSync: a catch-22. Symptom: the CC window
@@ -390,8 +434,9 @@ this route only if you already have the zip and don't need the panels.
 #### Either route, then:
 
 Launch the app with `./resources/scripts/creative-cloud/run-creative-cloud.sh` (menu 8). Sign in with
-your Adobe ID — note the login WebView2's cursor is invisible under wine, but it
-works blind: click the email field, type, **Tab**, type password, **Enter**.
+your Adobe ID. The pointer shows as a plain arrow over the sign-in page (the
+`x11cursor.so` preload; wine can't apply WebView2's own cursors because it runs
+in another process).
 Then click **Install** on **Lightroom Classic** in the Apps panel. Classic lands
 in the same `Program Files/Adobe/Adobe Lightroom Classic/` directory, so the
 rest of this guide (sections 6–8) applies unchanged.
