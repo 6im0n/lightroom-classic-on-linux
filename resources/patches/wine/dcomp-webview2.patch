@@ -1,0 +1,5284 @@
+dcomp for Edge WebView2 (Adobe Creative Cloud installer / app sign-in pages).
+
+This is wine-staging v11.10's dcomp-DCompositionCreateDevice2 patchset
+(patches 0001-0066, dlls/dcomp only, tests dropped), applied on Wine 11.10.
+The shared-visual handle code (staging-only wineserver requests) is stubbed
+out so the DLL works with any wineserver version; WebView2 does not use it.
+
+Why the pre-June version: wine-staging 11.11+ adds patch 0067
+"dcomp: Allow IDCompositionDevice3 interface". With it, Chromium (WebView2
+149+) accepts wine's device and takes its DirectComposition path, then
+aborts (int3) when the stubbed IDCompositionVisual::SetClipObject returns
+E_NOTIMPL. The gpu-process restarts every ~4 s, each restart maps another
+private ~300 MB copy of msedge.dll, and RAM runs away. Without 0067 the
+Device3 query fails, Chromium falls back to its HWND swapchain path, and the
+page renders (via DXVK's dummy composition swapchain).
+
+Source: https://gitlab.winehq.org/wine/wine-staging/-/tree/v11.10/patches/dcomp-DCompositionCreateDevice2
+diff --git a/dlls/dcomp/Makefile.in b/dlls/dcomp/Makefile.in
+index 3c14125..721f99d 100644
+--- a/dlls/dcomp/Makefile.in
++++ b/dlls/dcomp/Makefile.in
+@@ -1,6 +1,11 @@
+-MODULE    = dcomp.dll
++MODULE   = dcomp.dll
++IMPORTS  = d2d1 dwmapi user32 gdi32 d3dcompiler
+ 
+ VER_PRODUCTVERSION = 10,0,14393,0
+ 
+ SOURCES = \
+-	device.c
++	dcomp_private_iface.idl \
++	device.c \
++	surface.c \
++	target.c \
++	visual.c
+diff --git a/dlls/dcomp/dcomp.spec b/dlls/dcomp/dcomp.spec
+index 2120ce8..92c3b74 100644
+--- a/dlls/dcomp/dcomp.spec
++++ b/dlls/dcomp/dcomp.spec
+@@ -5,7 +5,7 @@
+ 1033 stub @
+ 1038 stub @
+ 1039 stub @
+-1040 stub @
++1040 stdcall -noname DCompositionCreateSharedVisualHandle(ptr)
+ 1041 stub @
+ 1042 stub @
+ 
+diff --git a/dlls/dcomp/dcomp_private.h b/dlls/dcomp/dcomp_private.h
+new file mode 100644
+index 0000000..ad41d9d
+--- /dev/null
++++ b/dlls/dcomp/dcomp_private.h
+@@ -0,0 +1,150 @@
++/*
++ * Copyright 2023 Zhiyi Zhang for CodeWeavers
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++#ifndef __WINE_DCOMP_PRIVATE_H
++#define __WINE_DCOMP_PRIVATE_H
++
++#include "dcomp.h"
++#include "dcomp_private_iface.h"
++#include "d2d1_1.h"
++#include <d3d11.h>
++#include "wine/list.h"
++
++struct composition_device
++{
++    IDCompositionDevice IDCompositionDevice_iface;
++    IDCompositionDeviceUnknown IDCompositionDeviceUnknown_iface;
++    IDCompositionSurfaceUnknown *drawing_surface;
++    struct list targets;
++    HANDLE thread;
++    BOOL exit_thread;
++    BOOL thread_exited;
++    int version;
++    LONG ref;
++};
++
++struct composition_surface_factory
++{
++    IDCompositionSurfaceFactory IDCompositionSurfaceFactory_iface;
++    IDCompositionDevice *device;
++    IUnknown *rendering_device;
++    GUID rendering_device_iid;
++    LONG ref;
++};
++
++struct composition_surface
++{
++    IDCompositionSurfaceUnknown IDCompositionSurfaceUnknown_iface;
++    IDCompositionSurfaceFactory *factory;
++    ID3D11Texture2D *draw_surface;
++    RECT draw_rect;
++    IUnknown *physical_surface;
++    GUID physical_surface_iid;
++    UINT width;
++    UINT height;
++    DXGI_FORMAT pixel_format;
++    DXGI_ALPHA_MODE alpha_mode;
++    LONG ref;
++};
++
++struct composition_target
++{
++    IDCompositionTarget IDCompositionTarget_iface;
++    IDCompositionDevice *device;
++    IDCompositionVisual *root;
++    BOOL topmost;
++    HWND hwnd;
++    HANDLE shared_visual_handle;
++    struct list entry;
++    LONG ref;
++};
++
++struct composition_visual
++{
++    IDCompositionVisualUnknown IDCompositionVisualUnknown_iface;
++    ID2D1GdiInteropRenderTarget *interop;
++    ID2D1DeviceContext *device_context;
++    IUnknown *content;
++    GUID content_iid;
++    enum DCOMPOSITION_BITMAP_INTERPOLATION_MODE interpolation_mode;
++    enum DCOMPOSITION_BORDER_MODE border_mode;
++    enum DCOMPOSITION_BACKFACE_VISIBILITY visibility;
++    float offset_x;
++    struct list child_visuals; /* visuals closer to head are lower in z-order */
++    struct list entry;
++    struct composition_visual *parent;
++    BOOL is_root;
++    BOOL is_child;
++    HANDLE shared_visual_handle;
++    int version;
++    LONG ref;
++};
++
++static inline struct composition_device *impl_from_IDCompositionDevice(IDCompositionDevice *iface)
++{
++    return CONTAINING_RECORD(iface, struct composition_device, IDCompositionDevice_iface);
++}
++
++static inline struct composition_device *impl_from_IDCompositionDeviceUnknown(IDCompositionDeviceUnknown *iface)
++{
++    return CONTAINING_RECORD(iface, struct composition_device, IDCompositionDeviceUnknown_iface);
++}
++
++static inline struct composition_surface *impl_from_IDCompositionSurfaceUnknown(IDCompositionSurfaceUnknown *iface)
++{
++    return CONTAINING_RECORD(iface, struct composition_surface, IDCompositionSurfaceUnknown_iface);
++}
++
++static inline struct composition_surface *impl_from_IDCompositionSurface(IDCompositionSurface *iface)
++{
++    return CONTAINING_RECORD(iface, struct composition_surface, IDCompositionSurfaceUnknown_iface);
++}
++
++static inline struct composition_surface_factory *impl_from_IDCompositionSurfaceFactory(IDCompositionSurfaceFactory *iface)
++{
++    return CONTAINING_RECORD(iface, struct composition_surface_factory, IDCompositionSurfaceFactory_iface);
++}
++
++struct composition_surface *unsafe_impl_from_IDCompositionSurface(IDCompositionSurface *iface);
++
++static inline struct composition_target *impl_from_IDCompositionTarget(IDCompositionTarget *iface)
++{
++    return CONTAINING_RECORD(iface, struct composition_target, IDCompositionTarget_iface);
++}
++
++static inline struct composition_visual *impl_from_IDCompositionVisual(IDCompositionVisual *iface)
++{
++    return CONTAINING_RECORD(iface, struct composition_visual, IDCompositionVisualUnknown_iface);
++}
++
++static inline struct composition_visual *impl_from_IDCompositionVisualUnknown(IDCompositionVisualUnknown *iface)
++{
++    return CONTAINING_RECORD(iface, struct composition_visual, IDCompositionVisualUnknown_iface);
++}
++
++void dcomp_lock(void);
++void dcomp_unlock(void);
++HRESULT create_surface(struct composition_surface_factory *factory, UINT width, UINT height,
++        DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode, IDCompositionSurface **dcomp_surface);
++HRESULT create_surface_factory(struct composition_device *device, IUnknown *rendering_device, IDCompositionSurfaceFactory **factory);
++HRESULT create_target(struct composition_device *device, HWND hwnd, BOOL topmost, IDCompositionTarget **target);
++HRESULT create_target_from_shared_visual_handle(struct composition_device *device, HANDLE shared_visual_handle, void **new_target);
++HRESULT create_visual(int version, REFIID iid, void **visual);
++HRESULT create_visual_from_shared_visual_handle(HANDLE shared_visual_handle, void **new_visual);
++
++
++#endif /* __WINE_DCOMP_PRIVATE_H */
+diff --git a/dlls/dcomp/dcomp_private_iface.idl b/dlls/dcomp/dcomp_private_iface.idl
+new file mode 100644
+index 0000000..0c46f14
+--- /dev/null
++++ b/dlls/dcomp/dcomp_private_iface.idl
+@@ -0,0 +1,361 @@
++/*
++ * Copyright 2024 Zhiyi Zhang for CodeWeavers
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#pragma makedep header
++
++import "dcomp.idl";
++
++[
++    object,
++    uuid(d14b6158-c3fa-4bce-9c1f-b61d8665eab0),
++    local,
++    pointer_default(unique)
++]
++interface IDCompositionDesktopDevicePartner : IDCompositionDesktopDevice
++{
++    HRESULT CreateSharedResource([in] REFIID riid, [out] void **obj);
++    HRESULT OpenSharedResourceHandle([in] IUnknown *unknown, [out] HANDLE *handle);
++    HRESULT CreateFromSharedVisualHandle([in] HANDLE handle, [in] REFIID iid, [out] void **out);
++}
++
++[
++    object,
++    uuid(28d6ad3d-ee2a-4bcd-9419-7d54800435b1),
++    local,
++    pointer_default(unique)
++]
++interface IDCompositionDeviceUnknown : IDCompositionDesktopDevicePartner
++{
++    HRESULT Unknown1();
++    HRESULT Unknown2();
++    HRESULT Unknown3();
++    HRESULT Unknown4();
++    HRESULT Unknown5();
++    HRESULT Unknown6();
++    HRESULT Unknown7();
++    HRESULT Unknown8();
++    HRESULT Unknown9();
++    HRESULT Unknown10();
++    HRESULT Unknown11();
++    HRESULT Unknown12();
++    HRESULT Unknown13();
++    HRESULT Unknown14();
++    HRESULT Unknown15();
++    HRESULT Unknown16(void **parameter1);
++    HRESULT Unknown17(void **parameter1);
++    HRESULT Unknown18();
++    HRESULT Unknown19();
++    HRESULT Unknown20();
++    HRESULT Unknown21();
++    HRESULT Unknown22();
++    HRESULT Unknown23();
++    HRESULT Unknown24();
++    HRESULT Unknown25();
++    HRESULT Unknown26();
++    HRESULT Unknown27();
++    HRESULT Unknown28();
++    HRESULT Unknown29();
++    HRESULT Unknown30();
++    HRESULT Unknown31();
++    HRESULT Unknown32();
++    HRESULT Unknown33();
++    HRESULT Unknown34();
++    HRESULT Unknown35();
++    HRESULT Unknown36();
++    HRESULT Unknown37();
++    HRESULT Unknown38();
++    HRESULT Unknown39();
++    HRESULT Unknown40();
++    HRESULT Unknown41();
++    HRESULT Unknown42();
++    HRESULT Unknown43();
++    HRESULT Unknown44();
++    HRESULT Unknown45();
++    HRESULT Unknown46();
++    HRESULT Unknown47();
++    HRESULT Unknown48();
++    HRESULT Unknown49();
++    HRESULT Unknown50();
++    HRESULT Unknown51();
++    HRESULT Unknown52();
++    HRESULT Unknown53();
++    HRESULT Unknown54();
++    HRESULT Unknown55();
++    HRESULT Unknown56();
++    HRESULT Unknown57();
++    HRESULT Unknown58();
++    HRESULT Unknown59();
++    HRESULT Unknown60();
++    HRESULT Unknown61();
++    HRESULT Unknown62();
++    HRESULT Unknown63();
++    HRESULT Unknown64();
++    HRESULT Unknown65();
++    HRESULT Unknown66();
++    HRESULT Unknown67();
++    HRESULT Unknown68();
++    HRESULT Unknown69();
++    HRESULT Unknown70();
++    HRESULT Unknown71();
++    HRESULT Unknown72();
++    HRESULT Unknown73();
++    HRESULT Unknown74();
++    HRESULT Unknown75();
++    HRESULT Unknown76();
++    HRESULT Unknown77();
++    HRESULT Unknown78();
++    HRESULT Unknown79();
++    HRESULT Unknown80();
++    HRESULT Unknown81();
++    HRESULT Unknown82();
++    HRESULT Unknown83();
++    HRESULT Unknown84();
++    HRESULT Unknown85();
++    HRESULT Unknown86();
++    HRESULT Unknown87();
++    HRESULT Unknown88();
++    HRESULT Unknown89();
++    HRESULT Unknown90();
++    HRESULT Unknown91();
++    HRESULT Unknown92();
++    HRESULT Unknown93();
++    HRESULT Unknown94();
++    HRESULT Unknown95();
++    HRESULT Unknown96();
++    HRESULT Unknown97();
++    HRESULT Unknown98();
++    HRESULT Unknown99();
++}
++
++[
++    object,
++    uuid(2c4eef28-1bc0-4736-b7dd-b62692f9bd67),
++    local,
++    pointer_default(unique)
++]
++interface IDCompositionVisualUnknown : IDCompositionVisual2
++{
++    HRESULT Unknown1();
++    HRESULT Unknown2();
++    HRESULT Unknown3();
++    HRESULT Unknown4();
++    HRESULT Unknown5();
++    HRESULT Unknown6();
++    HRESULT Unknown7();
++    HRESULT Unknown8();
++    HRESULT Unknown9();
++    HRESULT Unknown10();
++    HRESULT Unknown11();
++    HRESULT Unknown12();
++    HRESULT Unknown13();
++    HRESULT Unknown14(void *parameter1);
++    HRESULT Unknown15();
++    HRESULT Unknown16();
++    HRESULT Unknown17();
++    HRESULT Unknown18();
++    HRESULT Unknown19(float parameter1);
++    HRESULT Unknown20(float parameter1);
++    HRESULT Unknown21();
++    HRESULT Unknown22();
++    HRESULT Unknown23();
++    HRESULT Unknown24();
++    HRESULT Unknown25();
++    HRESULT Unknown26();
++    HRESULT Unknown27();
++    HRESULT Unknown28();
++    HRESULT Unknown29();
++    HRESULT Unknown30();
++    HRESULT Unknown31();
++    HRESULT Unknown32();
++    HRESULT Unknown33();
++    HRESULT Unknown34();
++    HRESULT Unknown35();
++    HRESULT Unknown36();
++    HRESULT Unknown37();
++    HRESULT Unknown38();
++    HRESULT Unknown39();
++    HRESULT Unknown40();
++    HRESULT Unknown41();
++    HRESULT Unknown42();
++    HRESULT Unknown43();
++    HRESULT Unknown44();
++    HRESULT Unknown45();
++    HRESULT Unknown46();
++    HRESULT Unknown47();
++    HRESULT Unknown48();
++    HRESULT Unknown49();
++    HRESULT Unknown50();
++    HRESULT Unknown51();
++    HRESULT Unknown52();
++    HRESULT Unknown53();
++    HRESULT Unknown54();
++    HRESULT Unknown55();
++    HRESULT Unknown56();
++    HRESULT Unknown57();
++    HRESULT Unknown58();
++    HRESULT Unknown59();
++    HRESULT Unknown60();
++    HRESULT Unknown61();
++    HRESULT Unknown62();
++    HRESULT Unknown63();
++    HRESULT Unknown64();
++    HRESULT Unknown65();
++    HRESULT Unknown66();
++    HRESULT Unknown67();
++    HRESULT Unknown68();
++    HRESULT Unknown69();
++    HRESULT Unknown70();
++    HRESULT Unknown71();
++    HRESULT Unknown72();
++    HRESULT Unknown73();
++    HRESULT Unknown74();
++    HRESULT Unknown75();
++    HRESULT Unknown76();
++    HRESULT Unknown77();
++    HRESULT Unknown78();
++    HRESULT Unknown79();
++    HRESULT Unknown80();
++    HRESULT Unknown81();
++    HRESULT Unknown82();
++    HRESULT Unknown83();
++    HRESULT Unknown84();
++    HRESULT Unknown85();
++    HRESULT Unknown86();
++    HRESULT Unknown87();
++    HRESULT Unknown88();
++    HRESULT Unknown89();
++    HRESULT Unknown90();
++    HRESULT Unknown91();
++    HRESULT Unknown92();
++    HRESULT Unknown93();
++    HRESULT Unknown94();
++    HRESULT Unknown95();
++    HRESULT Unknown96();
++    HRESULT Unknown97();
++    HRESULT Unknown98();
++    HRESULT Unknown99();
++}
++
++[
++    object,
++    uuid(5680c979-14c8-48b5-8b92-3247379fd907),
++    local,
++    pointer_default(unique)
++]
++interface IDCompositionSurfaceUnknown : IDCompositionSurface
++{
++    HRESULT Unknown1();
++    HRESULT Unknown2();
++    HRESULT Unknown3(UINT, UINT);
++    HRESULT Unknown4();
++    HRESULT Unknown5();
++    HRESULT Unknown6();
++    HRESULT Unknown7();
++    HRESULT Unknown8();
++    HRESULT Unknown9();
++    HRESULT Unknown10();
++    HRESULT Unknown11();
++    HRESULT Unknown12();
++    HRESULT Unknown13();
++    HRESULT Unknown14();
++    HRESULT Unknown15();
++    HRESULT Unknown16();
++    HRESULT Unknown17();
++    HRESULT Unknown18();
++    HRESULT Unknown19();
++    HRESULT Unknown20();
++    HRESULT Unknown21();
++    HRESULT Unknown22();
++    HRESULT Unknown23();
++    HRESULT Unknown24();
++    HRESULT Unknown25();
++    HRESULT Unknown26();
++    HRESULT Unknown27();
++    HRESULT Unknown28();
++    HRESULT Unknown29();
++    HRESULT Unknown30();
++    HRESULT Unknown31();
++    HRESULT Unknown32();
++    HRESULT Unknown33();
++    HRESULT Unknown34();
++    HRESULT Unknown35();
++    HRESULT Unknown36();
++    HRESULT Unknown37();
++    HRESULT Unknown38();
++    HRESULT Unknown39();
++    HRESULT Unknown40();
++    HRESULT Unknown41();
++    HRESULT Unknown42();
++    HRESULT Unknown43();
++    HRESULT Unknown44();
++    HRESULT Unknown45();
++    HRESULT Unknown46();
++    HRESULT Unknown47();
++    HRESULT Unknown48();
++    HRESULT Unknown49();
++    HRESULT Unknown50();
++    HRESULT Unknown51();
++    HRESULT Unknown52();
++    HRESULT Unknown53();
++    HRESULT Unknown54();
++    HRESULT Unknown55();
++    HRESULT Unknown56();
++    HRESULT Unknown57();
++    HRESULT Unknown58();
++    HRESULT Unknown59();
++    HRESULT Unknown60();
++    HRESULT Unknown61();
++    HRESULT Unknown62();
++    HRESULT Unknown63();
++    HRESULT Unknown64();
++    HRESULT Unknown65();
++    HRESULT Unknown66();
++    HRESULT Unknown67();
++    HRESULT Unknown68();
++    HRESULT Unknown69();
++    HRESULT Unknown70();
++    HRESULT Unknown71();
++    HRESULT Unknown72();
++    HRESULT Unknown73();
++    HRESULT Unknown74();
++    HRESULT Unknown75();
++    HRESULT Unknown76();
++    HRESULT Unknown77();
++    HRESULT Unknown78();
++    HRESULT Unknown79();
++    HRESULT Unknown80();
++    HRESULT Unknown81();
++    HRESULT Unknown82();
++    HRESULT Unknown83();
++    HRESULT Unknown84();
++    HRESULT Unknown85();
++    HRESULT Unknown86();
++    HRESULT Unknown87();
++    HRESULT Unknown88();
++    HRESULT Unknown89();
++    HRESULT Unknown90();
++    HRESULT Unknown91();
++    HRESULT Unknown92();
++    HRESULT Unknown93();
++    HRESULT Unknown94();
++    HRESULT Unknown95();
++    HRESULT Unknown96();
++    HRESULT Unknown97();
++    HRESULT Unknown98();
++    HRESULT Unknown99();
++}
+diff --git a/dlls/dcomp/device.c b/dlls/dcomp/device.c
+index 2744d75..336d257 100644
+--- a/dlls/dcomp/device.c
++++ b/dlls/dcomp/device.c
+@@ -1,5 +1,6 @@
+ /*
+  * Copyright 2020 Nikolay Sivov for CodeWeavers
++ * Copyright 2023 Zhiyi Zhang for CodeWeavers
+  *
+  * This library is free software; you can redistribute it and/or
+  * modify it under the terms of the GNU Lesser General Public
+@@ -15,33 +16,2031 @@
+  * License along with this library; if not, write to the Free Software
+  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+  */
++#include <assert.h>
+ #include <stdarg.h>
++#include <stdlib.h>
++#include <assert.h>
+ 
++#include "ntstatus.h"
++#define WIN32_NO_STATUS
++#define COBJMACROS
+ #include "windef.h"
+ #include "winbase.h"
++#include "wingdi.h"
++#include "winternl.h"
++#include "initguid.h"
+ #include "objidl.h"
++#include "dcomp_private.h"
+ #include "dxgi.h"
++#include "dwmapi.h"
++#include "d3d11_4.h"
++#include "d3dcompiler.h"
++#include "wine/server.h"
+ #include "wine/debug.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(dcomp);
+ 
+-HRESULT WINAPI DCompositionCreateDevice(IDXGIDevice *dxgi_device, REFIID iid, void **device)
++static CRITICAL_SECTION dcomp_cs;
++static CRITICAL_SECTION_DEBUG dcomp_debug =
++{
++    0, 0, &dcomp_cs,
++    { &dcomp_debug.ProcessLocksList, &dcomp_debug.ProcessLocksList },
++      0, 0, { (DWORD_PTR)(__FILE__ ": dcomp_cs") }
++};
++static CRITICAL_SECTION dcomp_cs = { &dcomp_debug, -1, 0, 0, 0, 0 };
++
++void dcomp_lock(void)
++{
++    EnterCriticalSection(&dcomp_cs);
++}
++
++void dcomp_unlock(void)
++{
++    LeaveCriticalSection(&dcomp_cs);
++}
++
++static HRESULT STDMETHODCALLTYPE device_QueryInterface(IDCompositionDevice *iface,
++        REFIID iid, void **out)
++{
++    struct composition_device *device = impl_from_IDCompositionDevice(iface);
++
++    TRACE("iface %p, iid %s, out %p\n", iface, debugstr_guid(iid), out);
++
++    if (IsEqualGUID(iid, &IID_IUnknown)
++            || IsEqualGUID(iid, &IID_IDCompositionDevice))
++    {
++        IUnknown_AddRef(&device->IDCompositionDevice_iface);
++        *out = &device->IDCompositionDevice_iface;
++        return S_OK;
++    }
++    else if ((device->version >= 2
++              && (IsEqualGUID(iid, &IID_IDCompositionDevice2)
++                  || IsEqualGUID(iid, &IID_IDCompositionDesktopDevice)))
++              || IsEqualGUID(iid, &IID_IDCompositionDesktopDevicePartner)
++              || IsEqualGUID(iid, &IID_IDCompositionDeviceUnknown))
++    {
++        IUnknown_AddRef(&device->IDCompositionDeviceUnknown_iface);
++        *out = &device->IDCompositionDeviceUnknown_iface;
++
++        if (IsEqualGUID(iid, &IID_IDCompositionDesktopDevicePartner)
++            || IsEqualGUID(iid, &IID_IDCompositionDeviceUnknown))
++            FIXME("Returning undocumented interface %s %p.\n", wine_dbgstr_guid(iid), *out);
++        return S_OK;
++    }
++
++    FIXME("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(iid));
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++
++static ULONG STDMETHODCALLTYPE device_AddRef(IDCompositionDevice *iface)
++{
++    struct composition_device *device = impl_from_IDCompositionDevice(iface);
++    ULONG ref = InterlockedIncrement(&device->ref);
++
++    TRACE("iface %p, ref %lu.\n", iface, ref);
++    return ref;
++}
++
++static ULONG STDMETHODCALLTYPE device_Release(IDCompositionDevice *iface)
++{
++    struct composition_device *device = impl_from_IDCompositionDevice(iface);
++    ULONG ref = InterlockedDecrement(&device->ref);
++
++    TRACE("iface %p, ref %lu.\n", iface, ref);
++
++    if (!ref)
++    {
++        if (device->thread)
++        {
++            WaitForSingleObject(device->thread, INFINITE);
++            CloseHandle(device->thread);
++        }
++        free(device);
++    }
++
++    return ref;
++}
++
++/* TODO: Optimize this. There is plenty of room */
++static HRESULT create_bgra_surface_from_rgba(IDXGISurface *rgba_surface, IDXGISurface **bgra_surface)
++{
++    static const D3D11_INPUT_ELEMENT_DESC layout_desc[] =
++    {
++        {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
++        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D11_INPUT_PER_VERTEX_DATA, 0},
++    };
++
++    static const char vs_code[] =
++        "void main(in float4 in_position : POSITION,\n"
++        "          in float2 in_texcoord : TEXCOORD,\n"
++        "          out float4 position : SV_Position,\n"
++        "          out float2 texcoord : TEXCOORD)\n"
++        "{\n"
++        "     position = in_position;\n"
++        "     texcoord = in_texcoord;\n"
++        "}";
++
++    static const char ps_code[] =
++        "Texture2D src_texture : register(t0);\n"
++        "SamplerState sam_linear : register(s0);\n"
++        "float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET"
++        "{\n"
++        "    return src_texture.Sample(sam_linear, uv);\n"
++        "}";
++
++    struct vec2
++    {
++        float x, y;
++    };
++
++    static const struct
++    {
++        struct vec2 position;
++        struct vec2 texcoord;
++    } quad[] =
++    {
++        {{-1.0f, 1.0f}, {0.0f, 0.0f}},   /* Top-Left */
++        {{1.0f, 1.0f}, {1.0f, 0.0f}},    /* Top-Right */
++        {{-1.0f, -1.0f}, {0.0f, 1.0f}},  /* Bottom-Left */
++        {{1.0f, -1.0f}, {1.0f, 1.0f}},   /* Bottom-Right */
++    };
++
++    ID3D11Texture2D *src_texture = NULL, *dst_texture = NULL;
++    ID3DDeviceContextState *state = NULL, *old_state = NULL;
++    ID3D11DeviceContext1 *d3d11_device_context1 = NULL;
++    ID3D11DeviceContext *d3d11_device_context = NULL;
++    static ID3D10Blob *vs_blob = NULL, *ps_blob = NULL;
++    ID3D11InputLayout *input_layout = NULL;
++    D3D11_SAMPLER_DESC sampler_desc = {0};
++    D3D11_SUBRESOURCE_DATA resource_data;
++    ID3D11ShaderResourceView *srv = NULL;
++    ID3D11Device1 *d3d11_device = NULL;
++    ID3D11RenderTargetView *rtv = NULL;
++    ID3D11SamplerState *sampler = NULL;
++    D3D11_TEXTURE2D_DESC texture_desc;
++    DXGI_SURFACE_DESC surface_desc;
++    D3D11_BUFFER_DESC buffer_desc;
++    ID3D11VertexShader *vs = NULL;
++    ID3D11PixelShader *ps = NULL;
++    unsigned int stride, offset;
++    ID3D11Buffer *vb = NULL;
++    D3D11_VIEWPORT vp;
++    HRESULT hr;
++
++    static const D3D_FEATURE_LEVEL feature_levels[] =
++    {
++        D3D_FEATURE_LEVEL_11_1,
++        D3D_FEATURE_LEVEL_11_0,
++        D3D_FEATURE_LEVEL_10_1,
++        D3D_FEATURE_LEVEL_10_0,
++    };
++
++    hr = IDXGISurface_QueryInterface(rgba_surface, &IID_ID3D11Texture2D, (void **)&src_texture);
++    if (FAILED(hr))
++    {
++        ERR("Failed to get a ID3D11Texture2D, hr %#lx.\n", hr);
++        goto done;
++    }
++
++    hr = IDXGISurface_GetDevice(rgba_surface, &IID_ID3D11Device1, (void **)&d3d11_device);
++    if (FAILED(hr))
++    {
++        ERR("Failed to get device, hr %#lx.\n", hr);
++        goto done;
++    }
++
++    hr = IDXGISurface_GetDesc(rgba_surface, &surface_desc);
++    if (FAILED(hr))
++    {
++        ERR("Failed to get the dxgi surface description, hr %#lx.\n", hr);
++        goto done;
++    }
++
++    texture_desc.Width = surface_desc.Width;
++    texture_desc.Height = surface_desc.Height;
++    texture_desc.MipLevels = 1;
++    texture_desc.ArraySize = 1;
++    texture_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
++    texture_desc.SampleDesc.Count = 1;
++    texture_desc.SampleDesc.Quality = 0;
++    texture_desc.Usage = D3D11_USAGE_DEFAULT;
++    texture_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
++    texture_desc.CPUAccessFlags = 0;
++    texture_desc.MiscFlags = D3D11_RESOURCE_MISC_GUARDED | D3D11_RESOURCE_MISC_GDI_COMPATIBLE;
++    hr = ID3D11Device1_CreateTexture2D(d3d11_device, &texture_desc, NULL, &dst_texture);
++    if (FAILED(hr))
++    {
++        ERR("Failed to create a ID3D11Texture2D, hr %#lx.\n", hr);
++        goto done;
++    }
++
++    hr = ID3D11Device1_CreateShaderResourceView(d3d11_device, (ID3D11Resource *)src_texture, NULL, &srv);
++    if (FAILED(hr))
++    {
++        ERR("Failed to create a SRV, hr %#lx.\n", hr);
++        goto done;
++    }
++
++    hr = ID3D11Device1_CreateRenderTargetView(d3d11_device, (ID3D11Resource *)dst_texture, NULL, &rtv);
++    if (FAILED(hr))
++    {
++        ERR("Failed to create a RTV, hr %#lx.\n", hr);
++        goto done;
++    }
++
++    ID3D11Device1_GetImmediateContext(d3d11_device, &d3d11_device_context);
++    if (FAILED(hr = ID3D11DeviceContext_QueryInterface(d3d11_device_context, &IID_ID3D11DeviceContext1,
++                                                       (void **)&d3d11_device_context1)))
++    {
++        ERR("Failed to query ID3D11DeviceContext1, hr %#lx.\n", hr);
++        goto done;
++    }
++
++    if (FAILED(hr = ID3D11Device1_CreateDeviceContextState(d3d11_device, 0, feature_levels,
++                                                           ARRAY_SIZE(feature_levels), D3D11_SDK_VERSION,
++                                                           &IID_ID3D11Device1, NULL, &state)))
++    {
++        ERR("Failed to create device context state, hr %#lx.\n", hr);
++        goto done;
++    }
++    ID3D11DeviceContext1_SwapDeviceContextState(d3d11_device_context1, state, &old_state);
++
++    ID3D11DeviceContext1_OMSetRenderTargets(d3d11_device_context1, 1, &rtv, NULL);
++    ID3D11DeviceContext1_PSSetShaderResources(d3d11_device_context1, 0, 1, &srv);
++
++    /* Move this to dcomp device instance ? */
++    if (vs_blob == NULL)
++    {
++        hr = D3DCompile(vs_code, sizeof(vs_code) - 1, "vs", NULL, NULL, "main", "vs_4_0", 0, 0, &vs_blob, NULL);
++        if (FAILED(hr))
++        {
++            ERR("Failed to compile vertex shader, hr %#lx.\n", hr);
++            goto done;
++        }
++
++        hr = D3DCompile(ps_code, sizeof(ps_code) - 1, "ps", NULL, NULL, "main", "ps_4_0", 0, 0, &ps_blob, NULL);
++        if (FAILED(hr))
++        {
++            ERR("Failed to compile pixel shader, hr %#lx.\n", hr);
++            goto done;
++        }
++    }
++
++    hr = ID3D11Device1_CreateVertexShader(d3d11_device, ID3D10Blob_GetBufferPointer(vs_blob),
++                                          ID3D10Blob_GetBufferSize(vs_blob), NULL, &vs);
++    if (FAILED(hr))
++    {
++        ERR("Failed to create vertex shader, hr %#lx.\n", hr);
++        goto done;
++    }
++
++    hr = ID3D11Device1_CreatePixelShader(d3d11_device, ID3D10Blob_GetBufferPointer(ps_blob),
++                                         ID3D10Blob_GetBufferSize(ps_blob), NULL, &ps);
++    if (FAILED(hr))
++    {
++        ERR("Failed to create pixel shader, hr %#lx.\n", hr);
++        goto done;
++    }
++
++    hr = ID3D11Device1_CreateInputLayout(d3d11_device, layout_desc, ARRAY_SIZE(layout_desc),
++                                         ID3D10Blob_GetBufferPointer(vs_blob),
++                                         ID3D10Blob_GetBufferSize(vs_blob), &input_layout);
++    if (FAILED(hr))
++    {
++        ERR("Failed to create input layout, hr %#lx.\n", hr);
++        goto done;
++    }
++
++    buffer_desc.ByteWidth = sizeof(quad);
++    buffer_desc.Usage = D3D11_USAGE_DEFAULT;
++    buffer_desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
++    buffer_desc.CPUAccessFlags = 0;
++    buffer_desc.MiscFlags = 0;
++    buffer_desc.StructureByteStride = 0;
++    resource_data.pSysMem = quad;
++    resource_data.SysMemPitch = 0;
++    resource_data.SysMemSlicePitch = 0;
++    hr = ID3D11Device1_CreateBuffer(d3d11_device, &buffer_desc, &resource_data, &vb);
++    if (FAILED(hr))
++    {
++        ERR("Failed to create vertex buffer, hr %#lx.\n", hr);
++        goto done;
++    }
++
++    sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
++    sampler_desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
++    sampler_desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
++    sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
++    sampler_desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
++    sampler_desc.MinLOD = 0;
++    sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
++
++    hr = ID3D11Device1_CreateSamplerState(d3d11_device, &sampler_desc, &sampler);
++    if (FAILED(hr))
++    {
++        ERR("Failed to create sampler state, hr %#lx.\n", hr);
++        goto done;
++    }
++    ID3D11DeviceContext1_PSSetSamplers(d3d11_device_context1, 0, 1, &sampler);
++
++    ID3D11DeviceContext1_IASetInputLayout(d3d11_device_context1, input_layout);
++    ID3D11DeviceContext1_IASetPrimitiveTopology(d3d11_device_context1, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
++
++    stride = sizeof(quad[0]);
++    offset = 0;
++    ID3D11DeviceContext1_IASetVertexBuffers(d3d11_device_context1, 0, 1, &vb, &stride, &offset);
++    ID3D11DeviceContext1_VSSetShader(d3d11_device_context1, vs, NULL, 0);
++    ID3D11DeviceContext1_PSSetShader(d3d11_device_context1, ps, NULL, 0);
++
++    vp.TopLeftX = 0;
++    vp.TopLeftY = 0;
++    vp.Width = surface_desc.Width;
++    vp.Height = surface_desc.Height;
++    vp.MinDepth = 0;
++    vp.MaxDepth = 1;
++    ID3D11DeviceContext1_RSSetViewports(d3d11_device_context1, 1, &vp);
++    ID3D11DeviceContext1_Draw(d3d11_device_context1, 4, 0);
++
++    hr = ID3D11Texture2D_QueryInterface(dst_texture, &IID_IDXGISurface, (void **)bgra_surface);
++    if (FAILED(hr))
++    {
++        ERR("Failed to get bgra surface, hr %#lx.\n", hr);
++        goto done;
++    }
++
++done:
++    if (old_state)
++    {
++        ID3D11DeviceContext1_SwapDeviceContextState(d3d11_device_context1, old_state, NULL);
++        ID3DDeviceContextState_Release(old_state);
++    }
++    if (state)
++        ID3DDeviceContextState_Release(state);
++    if (vb)
++        ID3D11Buffer_Release(vb);
++    if (sampler)
++        ID3D11SamplerState_Release(sampler);
++    if (input_layout)
++        ID3D11InputLayout_Release(input_layout);
++    if (ps)
++        ID3D11PixelShader_Release(ps);
++    if (vs)
++        ID3D11VertexShader_Release(vs);
++    if (d3d11_device_context1)
++        ID3D11DeviceContext1_Release(d3d11_device_context1);
++    if (d3d11_device_context)
++        ID3D11DeviceContext_Release(d3d11_device_context);
++    if (rtv)
++        ID3D11RenderTargetView_Release(rtv);
++    if (srv)
++        ID3D11ShaderResourceView_Release(srv);
++    if (dst_texture)
++        ID3D11Texture2D_Release(dst_texture);
++    if (d3d11_device)
++        ID3D11Device1_Release(d3d11_device);
++    if (src_texture)
++        ID3D11Texture2D_Release(src_texture);
++    return hr;
++}
++
++static void do_composite_dxgi_surface(const struct composition_target *target,
++                                      const struct composition_visual *visual,
++                                      IDXGISurface *dxgi_surface)
++{
++    ID3DDeviceContextState *state = NULL, *old_state = NULL;
++    ID3D11DeviceContext1 *d3d11_device_context1 = NULL;
++    ID3D11DeviceContext *d3d11_device_context = NULL;
++    ID3D11Multithread *multithread = NULL;
++    D2D1_BITMAP_PROPERTIES1 bitmap_desc;
++    ID2D1Bitmap1 *target_bitmap = NULL;
++    ID3D11Device1 *d3d11_device = NULL;
++    IDXGISurface *bgra_surface = NULL;
++    DXGI_SURFACE_DESC surface_desc;
++    ID2D1Bitmap *src_bitmap = NULL;
++    ID2D1Image *old_target = NULL;
++    HDC dst_dc, src_dc;
++    D2D1_SIZE_U size;
++    DWORD style;
++    HRESULT hr;
++
++    static const BLENDFUNCTION blend_func =
++    {
++      AC_SRC_OVER, /* BlendOp */
++      0,           /* BlendFlag */
++      255,         /* SourceConstantAlpha */
++      AC_SRC_ALPHA /* AlphaFormat */
++    };
++
++    static const D3D_FEATURE_LEVEL feature_levels[] =
++    {
++        D3D_FEATURE_LEVEL_11_1,
++        D3D_FEATURE_LEVEL_11_0,
++        D3D_FEATURE_LEVEL_10_1,
++        D3D_FEATURE_LEVEL_10_0,
++    };
++
++    if (!target->root)
++    {
++        ERR("Target has no root.\n");
++        goto done;
++    }
++
++    hr = IDXGISurface_GetDevice(dxgi_surface, &IID_ID3D11Device1, (void **)&d3d11_device);
++    if (FAILED(hr))
++    {
++        ERR("Failed to get device, hr %#lx.\n", hr);
++        goto done;
++    }
++
++    ID3D11Device1_GetImmediateContext(d3d11_device, &d3d11_device_context);
++    if (FAILED(hr = ID3D11DeviceContext_QueryInterface(d3d11_device_context, &IID_ID3D11DeviceContext1,
++                                                       (void **)&d3d11_device_context1)))
++    {
++        ERR("Failed to query ID3D11DeviceContext1, hr %#lx.\n", hr);
++        goto done;
++    }
++
++    /* Use ID3D11Multithread to avoid conflicts with rendering in an another thread with the same
++     * immediate ID3D11DeviceContext */
++    hr = ID3D11DeviceContext_QueryInterface(d3d11_device_context, &IID_ID3D11Multithread, (void **)&multithread);
++    if (FAILED(hr))
++    {
++        ERR("Failed to query ID3D11Multithread, hr %#lx.\n", hr);
++        goto done;
++    }
++
++    ID3D11Multithread_SetMultithreadProtected(multithread, TRUE);
++    ID3D11Multithread_Enter(multithread);
++
++    /* Is this really necessary? anyway, just to be safe */
++    if (FAILED(hr = ID3D11Device1_CreateDeviceContextState(d3d11_device, 0, feature_levels,
++                                                           ARRAY_SIZE(feature_levels), D3D11_SDK_VERSION,
++                                                           &IID_ID3D11Device1, NULL, &state)))
++    {
++        ERR("Failed to create device context state, hr %#lx.\n", hr);
++        goto done;
++    }
++    ID3D11DeviceContext1_SwapDeviceContextState(d3d11_device_context1, state, &old_state);
++
++    if (FAILED(hr = IDXGISurface_GetDesc(dxgi_surface, &surface_desc)))
++    {
++        ERR("Failed to get the dxgi surface description, hr %#lx.\n", hr);
++        goto done;
++    }
++
++    /* Convert DXGI_FORMAT_R8G8B8A8_UNORM to DXGI_FORMAT_B8G8R8A8_UNORM */
++    if (surface_desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM)
++    {
++        hr = create_bgra_surface_from_rgba(dxgi_surface, &bgra_surface);
++        if (FAILED(hr))
++        {
++            ERR("Failed to convert DXGI_FORMAT_R8G8B8A8_UNORM surface to DXGI_FORMAT_B8G8R8A8_UNORM, hr %#lx.\n", hr);
++            goto done;
++        }
++        dxgi_surface = bgra_surface;
++    }
++    else if (surface_desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT)
++    {
++        ERR("DXGI_FORMAT_R16G16B16A16_FLOAT surface is currently unsupported.\n");
++        goto done;
++    }
++
++    size.width = surface_desc.Width;
++    size.height = surface_desc.Height;
++    bitmap_desc.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
++    bitmap_desc.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
++    bitmap_desc.dpiX = 0;
++    bitmap_desc.dpiY = 0;
++    bitmap_desc.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_GDI_COMPATIBLE;
++    bitmap_desc.colorContext = NULL;
++
++    assert(visual->device_context);
++    if (FAILED(hr = ID2D1DeviceContext_CreateBitmap(visual->device_context, size, NULL, 0,
++            &bitmap_desc, &target_bitmap)))
++    {
++        ERR("Failed to create a bitmap, hr %#lx.\n", hr);
++        goto done;
++    }
++
++    if (FAILED(hr = ID2D1DeviceContext_CreateSharedBitmap(visual->device_context, &IID_IDXGISurface,
++            dxgi_surface, NULL, &src_bitmap)))
++    {
++        ERR("Failed to create a bitmap from dxgi surface, hr %#lx.\n", hr);
++        goto done;
++    }
++
++    if (FAILED(hr = ID2D1Bitmap1_CopyFromBitmap(target_bitmap, NULL, src_bitmap, NULL)))
++    {
++        ERR("Failed to copy bitmap, hr %#lx.\n", hr);
++        goto done;
++    }
++
++    ID2D1DeviceContext_GetTarget(visual->device_context, &old_target);
++    ID2D1DeviceContext_SetTarget(visual->device_context, (ID2D1Image *)target_bitmap);
++    if (FAILED(hr = ID2D1GdiInteropRenderTarget_GetDC(visual->interop, D2D1_DC_INITIALIZE_MODE_COPY,
++            &src_dc)))
++    {
++        ERR("GetDC failed, hr %#lx.\n", hr);
++        ID2D1DeviceContext_SetTarget(visual->device_context, old_target);
++        if (old_target)
++            ID2D1Image_Release(old_target);
++        goto done;
++    }
++
++    style = DCX_USESTYLE | DCX_CACHE;
++    if (!target->topmost)
++        style |= DCX_CLIPCHILDREN;
++    dst_dc = GetDCEx(target->hwnd, 0, style);
++    GdiAlphaBlend(dst_dc, 0, 0, size.width, size.height, src_dc, 0, 0, size.width, size.height, blend_func);
++    ReleaseDC(target->hwnd, dst_dc);
++
++    ID2D1GdiInteropRenderTarget_ReleaseDC(visual->interop, NULL);
++    ID2D1DeviceContext_SetTarget(visual->device_context, old_target);
++    if (old_target)
++        ID2D1Image_Release(old_target);
++
++done:
++    if (bgra_surface)
++        IDXGISurface_Release(bgra_surface);
++    if (src_bitmap)
++        ID2D1Bitmap_Release(src_bitmap);
++    if (target_bitmap)
++        ID2D1Bitmap1_Release(target_bitmap);
++    if (d3d11_device_context1 && old_state)
++    {
++        ID3D11DeviceContext1_SwapDeviceContextState(d3d11_device_context1, old_state, NULL);
++        ID3DDeviceContextState_Release(old_state);
++    }
++    if (state)
++        ID3DDeviceContextState_Release(state);
++    if (multithread)
++    {
++        ID3D11Multithread_Leave(multithread);
++        ID3D11Multithread_Release(multithread);
++    }
++    if (d3d11_device_context1)
++        ID3D11DeviceContext1_Release(d3d11_device_context1);
++    if (d3d11_device_context)
++        ID3D11DeviceContext_Release(d3d11_device_context);
++    if (d3d11_device)
++        ID3D11Device1_Release(d3d11_device);
++}
++
++static struct composition_visual * shared_visual_target_get_root(HANDLE shared_visual_handle)
++{
++    /* Lightroom-on-Linux: shared visuals need staging-only wineserver requests
++     * (dcomp_*_shared_visual*). Dropped so this DLL runs on any wineserver;
++     * DCompositionCreateSharedVisualHandle never hands out a handle. */
++    ERR("shared visual %p not supported.\n", shared_visual_handle);
++    return NULL;
++}
++
++static HRESULT do_composite(const struct composition_target *target, struct composition_visual *visual)
++{
++    struct composition_visual *child_visual;
++    IDXGISurface *dxgi_surface;
++    HRESULT hr;
++
++    if (visual->shared_visual_handle)
++    {
++        struct composition_visual *root = shared_visual_target_get_root(visual->shared_visual_handle);
++        if (root)
++            do_composite(target, root);
++    }
++
++    /* Render content */
++    if (visual->content)
++    {
++        if (IsEqualGUID(&visual->content_iid, &IID_IDXGISwapChain1))
++        {
++            DXGI_SWAP_CHAIN_DESC swapchain_desc;
++            IDXGISwapChain1 *swapchain;
++
++            hr = IUnknown_QueryInterface(visual->content, &IID_IDXGISwapChain1, (void **)&swapchain);
++            if (FAILED(hr))
++            {
++                FIXME("Failed to query IDXGISwapChain1.\n");
++                return hr;
++            }
++
++            hr = IDXGISwapChain1_GetDesc(swapchain, &swapchain_desc);
++            if (FAILED(hr))
++            {
++                ERR("Failed to get the swapchain description, hr %#lx.\n", hr);
++                IDXGISwapChain1_Release(swapchain);
++                return hr;
++            }
++
++            /* The front buffer is the last back buffer because the composition swapchain must
++                     * be created with DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL */
++            hr = IDXGISwapChain1_GetBuffer(swapchain, 0, &IID_IDXGISurface,
++                                           (void **)&dxgi_surface);
++            IDXGISwapChain1_Release(swapchain);
++            if (FAILED(hr))
++            {
++                ERR("Failed to get the swapchain front buffer, hr %#lx.\n", hr);
++                return hr;
++            }
++        }
++        else if (IsEqualGUID(&visual->content_iid, &IID_IDCompositionSurface))
++        {
++            struct composition_surface *surface_impl;
++            IDCompositionSurface *surface;
++
++            hr = IUnknown_QueryInterface(visual->content, &IID_IDCompositionSurface, (void **)&surface);
++            if (FAILED(hr))
++            {
++                FIXME("Failed to query IDCompositionSurface.\n");
++                return hr;
++            }
++
++            surface_impl = impl_from_IDCompositionSurface(surface);
++            if (IsEqualGUID(&surface_impl->physical_surface_iid, &IID_IDXGISurface))
++            {
++                dxgi_surface = (IDXGISurface *)surface_impl->physical_surface;
++                IDXGISurface_AddRef(dxgi_surface);
++                IDCompositionSurface_Release(surface);
++            }
++            else
++            {
++                FIXME("IDCompositionSurface physical_surface_iid %s is unsupported.\n",
++                      wine_dbgstr_guid(&surface_impl->physical_surface_iid));
++                IDCompositionSurface_Release(surface);
++                return E_FAIL;
++            }
++        }
++        else
++        {
++            FIXME("content_iid %s is unsupported.\n", wine_dbgstr_guid(&visual->content_iid));
++            return E_FAIL;
++        }
++
++        do_composite_dxgi_surface(target, visual, dxgi_surface);
++        IDXGISurface_Release(dxgi_surface);
++    }
++
++    LIST_FOR_EACH_ENTRY(child_visual, &visual->child_visuals, struct composition_visual, entry)
++    {
++        do_composite(target, child_visual);
++    }
++
++    return S_OK;
++}
++
++
++static DWORD WINAPI composite_thread_proc(void *iface)
++{
++    struct composition_device *device = impl_from_IDCompositionDevice(iface);
++    unsigned int count, frequency, refresh_period;
++    struct composition_target *target;
++    struct composition_visual *visual;
++    HDC hdc;
++
++    /* TODO: Implement and use D3DKMTWaitForVerticalBlankEvent() */
++    hdc = GetDC(0);
++    frequency = GetDeviceCaps(hdc, VREFRESH);
++    refresh_period = 1000 / frequency;
++    ReleaseDC(0, hdc);
++
++    while (TRUE)
++    {
++        dcomp_lock();
++
++        count = 0;
++        LIST_FOR_EACH_ENTRY(target, &device->targets, struct composition_target, entry)
++        {
++            if (!target->root)
++            {
++                FIXME("Target %p has no root.\n", &target->IDCompositionTarget_iface);
++                continue;
++            }
++
++            /* Skip targets created from a shared visual handle. Composition for such targets will
++             * be done for the visual tree where the visual created from the shared visual handle is at */
++            if (target->shared_visual_handle)
++                continue;
++
++            visual = impl_from_IDCompositionVisual(target->root);
++            if (SUCCEEDED(do_composite(target, visual)))
++                count++;
++        }
++
++        if (!count)
++        {
++            TRACE("Composition thread exited.\n");
++            device->thread_exited = TRUE;
++            dcomp_unlock();
++            break;
++        }
++
++        dcomp_unlock();
++
++        if (device->exit_thread)
++            break;
++
++        Sleep(refresh_period);
++    }
++
++    return 0;
++}
++
++static HRESULT STDMETHODCALLTYPE device_Commit(IDCompositionDevice *iface)
++{
++    struct composition_device *device = impl_from_IDCompositionDevice(iface);
++    HRESULT hr = S_OK;
++
++    FIXME("iface %p semi-stub!\n", iface);
++
++    dcomp_lock();
++
++    if (!device->thread || device->thread_exited)
++    {
++        if (device->thread)
++        {
++            device->exit_thread = TRUE;
++            WaitForSingleObject(device->thread, INFINITE);
++            CloseHandle(device->thread);
++        }
++        device->thread_exited = FALSE;
++        device->exit_thread = FALSE;
++        device->thread = CreateThread(NULL, 0, composite_thread_proc, iface, 0, NULL);
++    }
++
++    dcomp_unlock();
++
++    return hr;
++}
++
++static HRESULT STDMETHODCALLTYPE device_WaitForCommitCompletion(IDCompositionDevice *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE device_GetFrameStatistics(IDCompositionDevice *iface,
++        DCOMPOSITION_FRAME_STATISTICS *statistics)
++{
++    FIXME("iface %p, statistics %p stub!\n", iface, statistics);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE device_CreateTargetForHwnd(IDCompositionDevice *iface,
++        HWND hwnd, BOOL topmost, IDCompositionTarget **target)
++{
++    struct composition_device *device = impl_from_IDCompositionDevice(iface);
++
++    TRACE("iface %p, hwnd %p, topmost %d, target %p\n", iface, hwnd, topmost, target);
++
++    return create_target(device, hwnd, topmost, target);
++}
++
++static HRESULT STDMETHODCALLTYPE device_CreateVisual(IDCompositionDevice *iface,
++        IDCompositionVisual **visual)
++{
++    TRACE("iface %p, visual %p\n", iface, visual);
++
++    return create_visual(1, &IID_IDCompositionVisual, (void **)visual);
++}
++
++static HRESULT STDMETHODCALLTYPE device_CreateSurface(IDCompositionDevice *iface,
++        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
++        IDCompositionSurface **surface)
++{
++    FIXME("iface %p, width %u, height %u, format %#x, alpha_mode %#x, surface %p stub!\n", iface,
++            width, height, pixel_format, alpha_mode, surface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE device_CreateVirtualSurface(IDCompositionDevice *iface,
++        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
++        IDCompositionVirtualSurface **surface)
++{
++    FIXME("iface %p, width %u, height %u, format %#x, alpha_mode %#x, surface %p stub!\n", iface,
++            width, height, pixel_format, alpha_mode, surface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE device_CreateSurfaceFromHandle(IDCompositionDevice *iface,
++        HANDLE handle, IUnknown **surface)
++{
++    FIXME("iface %p, handle %p, surface %p stub!\n", iface, handle, surface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE device_CreateSurfaceFromHwnd(IDCompositionDevice *iface,
++        HWND hwnd, IUnknown **surface)
++{
++    FIXME("iface %p, hwnd %p, surface %p stub!\n", iface, hwnd, surface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE device_CreateTranslateTransform(IDCompositionDevice *iface,
++        IDCompositionTranslateTransform **transform)
++{
++    FIXME("iface %p, transform %p stub!\n", iface, transform);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE device_CreateScaleTransform(IDCompositionDevice *iface,
++        IDCompositionScaleTransform **transform)
++{
++    FIXME("iface %p, transform %p stub!\n", iface, transform);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE device_CreateRotateTransform(IDCompositionDevice *iface,
++        IDCompositionRotateTransform **transform)
++{
++    FIXME("iface %p, transform %p stub!\n", iface, transform);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE device_CreateSkewTransform(IDCompositionDevice *iface,
++        IDCompositionSkewTransform **transform)
++{
++    FIXME("iface %p, transform %p stub!\n", iface, transform);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE device_CreateMatrixTransform(IDCompositionDevice *iface,
++        IDCompositionMatrixTransform **transform)
++{
++    FIXME("iface %p, transform %p stub!\n", iface, transform);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE device_CreateTransformGroup(IDCompositionDevice *iface,
++        IDCompositionTransform **transforms, UINT elements,
++        IDCompositionTransform **transform_group)
++{
++    FIXME("iface %p, transforms %p, elements %u, transform_group %p stub!\n", iface, transforms,
++            elements, transform_group);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE device_CreateTranslateTransform3D(IDCompositionDevice *iface,
++        IDCompositionTranslateTransform3D **transform_3d)
++{
++    FIXME("iface %p, translate_transform_3d %p stub!\n", iface, transform_3d);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE device_CreateScaleTransform3D(IDCompositionDevice *iface,
++        IDCompositionScaleTransform3D **transform_3d)
++{
++    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE device_CreateRotateTransform3D(IDCompositionDevice *iface,
++        IDCompositionRotateTransform3D **transform_3d)
++{
++    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE device_CreateMatrixTransform3D(IDCompositionDevice *iface,
++        IDCompositionMatrixTransform3D **transform_3d)
++{
++    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE device_CreateTransform3DGroup(IDCompositionDevice *iface,
++        IDCompositionTransform3D **transforms_3d, UINT elements,
++        IDCompositionTransform3D **transform_3d_group)
++{
++    FIXME("iface %p, transforms_3d %p, elements %u, transform_3d_group %p stub!\n", iface,
++            transforms_3d, elements, transform_3d_group);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE device_CreateEffectGroup(IDCompositionDevice *iface,
++        IDCompositionEffectGroup **effect_group)
++{
++    FIXME("iface %p, effect_group %p stub!\n", iface, effect_group);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE device_CreateRectangleClip(IDCompositionDevice *iface,
++        IDCompositionRectangleClip **clip)
++{
++    FIXME("iface %p, clip %p stub!\n", iface, clip);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE device_CreateAnimation(IDCompositionDevice *iface,
++        IDCompositionAnimation **animation)
++{
++    FIXME("iface %p, animation %p stub!\n", iface, animation);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE device_CheckDeviceState(IDCompositionDevice *iface,
++        BOOL *valid)
++{
++    FIXME("iface %p, valid %p stub!\n", iface, valid);
++    return E_NOTIMPL;
++}
++
++static const struct IDCompositionDeviceVtbl device_vtbl =
++{
++    /* IUnknown methods */
++    device_QueryInterface,
++    device_AddRef,
++    device_Release,
++    /* IDCompositionDevice methods */
++    device_Commit,
++    device_WaitForCommitCompletion,
++    device_GetFrameStatistics,
++    device_CreateTargetForHwnd,
++    device_CreateVisual,
++    device_CreateSurface,
++    device_CreateVirtualSurface,
++    device_CreateSurfaceFromHandle,
++    device_CreateSurfaceFromHwnd,
++    device_CreateTranslateTransform,
++    device_CreateScaleTransform,
++    device_CreateRotateTransform,
++    device_CreateSkewTransform,
++    device_CreateMatrixTransform,
++    device_CreateTransformGroup,
++    device_CreateTranslateTransform3D,
++    device_CreateScaleTransform3D,
++    device_CreateRotateTransform3D,
++    device_CreateMatrixTransform3D,
++    device_CreateTransform3DGroup,
++    device_CreateEffectGroup,
++    device_CreateRectangleClip,
++    device_CreateAnimation,
++    device_CheckDeviceState,
++};
++
++static HRESULT STDMETHODCALLTYPE desktop_device_QueryInterface(IDCompositionDeviceUnknown *iface,
++        REFIID iid, void **out)
++{
++    struct composition_device *device = impl_from_IDCompositionDeviceUnknown(iface);
++
++    TRACE("iface %p.\n", iface);
++
++    return IDCompositionDevice_QueryInterface(&device->IDCompositionDevice_iface, iid, out);
++}
++
++static ULONG STDMETHODCALLTYPE desktop_device_AddRef(IDCompositionDeviceUnknown *iface)
++{
++    struct composition_device *device = impl_from_IDCompositionDeviceUnknown(iface);
++
++    TRACE("iface %p.\n", iface);
++
++    return IDCompositionDevice_AddRef(&device->IDCompositionDevice_iface);
++}
++
++static ULONG STDMETHODCALLTYPE desktop_device_Release(IDCompositionDeviceUnknown *iface)
++{
++    struct composition_device *device = impl_from_IDCompositionDeviceUnknown(iface);
++
++    TRACE("iface %p.\n", iface);
++
++    return IDCompositionDevice_Release(&device->IDCompositionDevice_iface);
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Commit(IDCompositionDeviceUnknown *iface)
++{
++    struct composition_device *device = impl_from_IDCompositionDeviceUnknown(iface);
++
++    TRACE("iface %p.\n", iface);
++
++    return IDCompositionDevice_Commit(&device->IDCompositionDevice_iface);
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_WaitForCommitCompletion(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_GetFrameStatistics(IDCompositionDeviceUnknown *iface,
++        DCOMPOSITION_FRAME_STATISTICS *statistics)
++{
++    FIXME("iface %p, statistics %p stub!\n", iface, statistics);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_CreateVisual(IDCompositionDeviceUnknown *iface,
++        IDCompositionVisual2 **visual)
++{
++    TRACE("iface %p, visual %p\n", iface, visual);
++
++    return create_visual(2, &IID_IDCompositionVisual2, (void **)visual);
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_CreateSurfaceFactory(IDCompositionDeviceUnknown *iface,
++        IUnknown *rendering_device, IDCompositionSurfaceFactory **surface_factory)
++{
++    struct composition_device *device = impl_from_IDCompositionDeviceUnknown(iface);
++
++    TRACE("iface %p, rendering_device %p, surface_factory %p.\n", iface, rendering_device, surface_factory);
++
++    return create_surface_factory(device, rendering_device, surface_factory);
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_CreateSurface(IDCompositionDeviceUnknown *iface,
++        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
++        IDCompositionSurface **surface)
++{
++    FIXME("iface %p, width %u, height %u, format %#x, alpha_mode %#x, surface %p stub!\n", iface,
++            width, height, pixel_format, alpha_mode, surface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_CreateVirtualSurface(IDCompositionDeviceUnknown *iface,
++        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
++        IDCompositionVirtualSurface **surface)
++{
++    FIXME("iface %p, width %u, height %u, format %#x, alpha_mode %#x, surface %p stub!\n", iface,
++            width, height, pixel_format, alpha_mode, surface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_CreateTranslateTransform(IDCompositionDeviceUnknown *iface,
++        IDCompositionTranslateTransform **transform)
++{
++    FIXME("iface %p, transform %p stub!\n", iface, transform);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_CreateScaleTransform(IDCompositionDeviceUnknown *iface,
++        IDCompositionScaleTransform **transform)
++{
++    FIXME("iface %p, transform %p stub!\n", iface, transform);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_CreateRotateTransform(IDCompositionDeviceUnknown *iface,
++        IDCompositionRotateTransform **transform)
++{
++    FIXME("iface %p, transform %p stub!\n", iface, transform);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_CreateSkewTransform(IDCompositionDeviceUnknown *iface,
++        IDCompositionSkewTransform **transform)
++{
++    FIXME("iface %p, transform %p stub!\n", iface, transform);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_CreateMatrixTransform(IDCompositionDeviceUnknown *iface,
++        IDCompositionMatrixTransform **transform)
++{
++    FIXME("iface %p, transform %p stub!\n", iface, transform);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_CreateTransformGroup(IDCompositionDeviceUnknown *iface,
++        IDCompositionTransform **transforms, UINT elements, IDCompositionTransform **transform_group)
++{
++    FIXME("iface %p, transforms %p, elements %u, transform_group %p stub!\n", iface, transforms,
++            elements, transform_group);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_CreateTranslateTransform3D(IDCompositionDeviceUnknown *iface,
++        IDCompositionTranslateTransform3D **transform_3d)
++{
++    FIXME("iface %p, translate_transform_3d %p stub!\n", iface, transform_3d);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_CreateScaleTransform3D(IDCompositionDeviceUnknown *iface,
++        IDCompositionScaleTransform3D **transform_3d)
++{
++    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_CreateRotateTransform3D(IDCompositionDeviceUnknown *iface,
++        IDCompositionRotateTransform3D **transform_3d)
++{
++    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_CreateMatrixTransform3D(IDCompositionDeviceUnknown *iface,
++        IDCompositionMatrixTransform3D **transform_3d)
++{
++    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_CreateTransform3DGroup(IDCompositionDeviceUnknown *iface,
++        IDCompositionTransform3D **transforms_3d, UINT elements,
++        IDCompositionTransform3D **transform_3d_group)
++{
++    FIXME("iface %p, transforms_3d %p, elements %u, transform_3d_group %p stub!\n", iface,
++            transforms_3d, elements, transform_3d_group);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_CreateEffectGroup(IDCompositionDeviceUnknown *iface,
++        IDCompositionEffectGroup **effect_group)
++{
++    FIXME("iface %p, effect_group %p stub!\n", iface, effect_group);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_CreateRectangleClip(IDCompositionDeviceUnknown *iface,
++        IDCompositionRectangleClip **clip)
++{
++    FIXME("iface %p, clip %p stub!\n", iface, clip);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_CreateAnimation(IDCompositionDeviceUnknown *iface,
++        IDCompositionAnimation **animation)
++{
++    FIXME("iface %p, animation %p stub!\n", iface, animation);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_CreateTargetForHwnd(IDCompositionDeviceUnknown *iface,
++        HWND hwnd, BOOL topmost, IDCompositionTarget **target)
++{
++    struct composition_device *device = impl_from_IDCompositionDeviceUnknown(iface);
++
++    TRACE("iface %p, hwnd %p, topmost %d, target %p\n", iface, hwnd, topmost, target);
++
++    return IDCompositionDevice_CreateTargetForHwnd(&device->IDCompositionDevice_iface, hwnd,
++            topmost, target);
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_CreateSurfaceFromHandle(IDCompositionDeviceUnknown *iface,
++        HANDLE handle, IUnknown **surface)
++{
++    FIXME("iface %p, handle %p, surface %p stub!\n", iface, handle, surface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_CreateSurfaceFromHwnd(IDCompositionDeviceUnknown *iface,
++        HWND hwnd, IUnknown **surface)
++{
++    FIXME("iface %p, hwnd %p, surface %p stub!\n", iface, hwnd, surface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_CreateSharedResource(IDCompositionDeviceUnknown *iface,
++        REFIID riid, void **obj)
++{
++    FIXME("iface %p, riid %s, obj %p stub!\n", iface, debugstr_guid(riid), obj);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_OpenSharedResourceHandle(IDCompositionDeviceUnknown *iface,
++        IUnknown *unknown, HANDLE *handle)
++{
++    FIXME("iface %p, unknown %p, handle %p stub!\n", iface, unknown, handle);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_CreateFromSharedVisualHandle(IDCompositionDeviceUnknown *iface,
++     HANDLE visual_handle, REFIID iid, void **out)
++{
++    HRESULT hr;
++
++    FIXME("iface %p visual_handle %p, iid %s, out %p stub!\n", iface, visual_handle, debugstr_guid(iid), out);
++
++    /* visual_handle is from DCompositionCreateSharedVisualHandle(). iid is IID_IDCompositionVisual
++    * or IDCompositionTarget */
++    assert(IsEqualGUID(iid, &IID_IDCompositionVisual) || IsEqualGUID(iid, &IID_IDCompositionTarget));
++    assert(out);
++
++    if (IsEqualGUID(iid, &IID_IDCompositionVisual))
++    {
++        hr = create_visual_from_shared_visual_handle(visual_handle, out);
++        FIXME("Created a IDCompositionVisual %p from a shared visual handle %p, hr %#lx.\n", *out,
++              visual_handle, hr);
++        return hr;
++    }
++    else if (IsEqualGUID(iid, &IID_IDCompositionTarget))
++    {
++        hr = create_target_from_shared_visual_handle(impl_from_IDCompositionDeviceUnknown(iface),
++                                                     visual_handle, (void **)out);
++        FIXME("Created a IDCompositionTarget %p from a shared visual handle %p, hr %#lx.\n", *out,
++              visual_handle, hr);
++        return hr;
++    }
++    else
++    {
++        FIXME("Unsupported GUID %s, returning E_NOTIMPL.\n", debugstr_guid(iid));
++        return E_NOTIMPL;
++    }
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown1(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown2(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown3(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown4(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown5(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown6(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown7(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown8(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown9(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown10(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown11(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown12(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown13(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown14(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown15(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown16(IDCompositionDeviceUnknown *iface, void **parameter1)
++{
++    FIXME("iface %p parameter1 %p stub!\n", iface, parameter1);
++
++    if (!parameter1)
++        return E_INVALIDARG;
++
++    *parameter1 = NULL;
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown17(IDCompositionDeviceUnknown *iface, void **parameter1)
++{
++    FIXME("iface %p parameter1 %p stub!\n", iface, parameter1);
++
++    if (!parameter1)
++        return E_INVALIDARG;
++
++    *parameter1 = NULL;
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown18(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown19(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown20(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown21(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown22(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown23(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown24(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown25(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown26(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown27(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown28(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown29(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown30(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown31(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown32(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown33(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown34(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown35(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown36(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown37(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown38(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown39(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown40(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown41(IDCompositionDeviceUnknown *iface)
+ {
+-    FIXME("%p, %s, %p.\n", dxgi_device, debugstr_guid(iid), device);
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
+ 
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown42(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
+     return E_NOTIMPL;
+ }
+ 
+-HRESULT WINAPI DCompositionCreateDevice2(IUnknown *rendering_device, REFIID iid, void **device)
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown43(IDCompositionDeviceUnknown *iface)
+ {
+-    FIXME("%p, %s, %p.\n", rendering_device, debugstr_guid(iid), device);
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown44(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown45(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown46(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown47(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown48(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown49(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown50(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown51(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown52(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown53(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown54(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown55(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown56(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown57(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown58(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown59(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown60(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown61(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown62(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown63(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown64(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown65(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown66(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown67(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown68(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown69(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown70(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown71(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown72(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown73(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown74(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown75(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown76(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown77(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown78(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown79(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown80(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown81(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown82(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown83(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown84(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown85(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown86(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown87(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown88(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown89(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown90(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown91(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown92(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown93(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown94(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown95(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown96(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown97(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown98(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
+ 
++static HRESULT STDMETHODCALLTYPE desktop_device_Unknown99(IDCompositionDeviceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
+     return E_NOTIMPL;
+ }
+ 
++static const struct IDCompositionDeviceUnknownVtbl desktop_device_vtbl =
++{
++    /* IUnknown methods */
++    desktop_device_QueryInterface,
++    desktop_device_AddRef,
++    desktop_device_Release,
++    /* IDCompositionDevice2 methods */
++    desktop_device_Commit,
++    desktop_device_WaitForCommitCompletion,
++    desktop_device_GetFrameStatistics,
++    desktop_device_CreateVisual,
++    desktop_device_CreateSurfaceFactory,
++    desktop_device_CreateSurface,
++    desktop_device_CreateVirtualSurface,
++    desktop_device_CreateTranslateTransform,
++    desktop_device_CreateScaleTransform,
++    desktop_device_CreateRotateTransform,
++    desktop_device_CreateSkewTransform,
++    desktop_device_CreateMatrixTransform,
++    desktop_device_CreateTransformGroup,
++    desktop_device_CreateTranslateTransform3D,
++    desktop_device_CreateScaleTransform3D,
++    desktop_device_CreateRotateTransform3D,
++    desktop_device_CreateMatrixTransform3D,
++    desktop_device_CreateTransform3DGroup,
++    desktop_device_CreateEffectGroup,
++    desktop_device_CreateRectangleClip,
++    desktop_device_CreateAnimation,
++    /* IDCompositionDesktopDevice methods */
++    desktop_device_CreateTargetForHwnd,
++    desktop_device_CreateSurfaceFromHandle,
++    desktop_device_CreateSurfaceFromHwnd,
++    /* IDCompositionDesktopDevicePartner methods */
++    desktop_device_CreateSharedResource,
++    desktop_device_OpenSharedResourceHandle,
++    desktop_device_CreateFromSharedVisualHandle,
++    /* IDCompositionDeviceUnknown methods */
++    desktop_device_Unknown1,
++    desktop_device_Unknown2,
++    desktop_device_Unknown3,
++    desktop_device_Unknown4,
++    desktop_device_Unknown5,
++    desktop_device_Unknown6,
++    desktop_device_Unknown7,
++    desktop_device_Unknown8,
++    desktop_device_Unknown9,
++    desktop_device_Unknown10,
++    desktop_device_Unknown11,
++    desktop_device_Unknown12,
++    desktop_device_Unknown13,
++    desktop_device_Unknown14,
++    desktop_device_Unknown15,
++    desktop_device_Unknown16,
++    desktop_device_Unknown17,
++    desktop_device_Unknown18,
++    desktop_device_Unknown19,
++    desktop_device_Unknown20,
++    desktop_device_Unknown21,
++    desktop_device_Unknown22,
++    desktop_device_Unknown23,
++    desktop_device_Unknown24,
++    desktop_device_Unknown25,
++    desktop_device_Unknown26,
++    desktop_device_Unknown27,
++    desktop_device_Unknown28,
++    desktop_device_Unknown29,
++    desktop_device_Unknown30,
++    desktop_device_Unknown31,
++    desktop_device_Unknown32,
++    desktop_device_Unknown33,
++    desktop_device_Unknown34,
++    desktop_device_Unknown35,
++    desktop_device_Unknown36,
++    desktop_device_Unknown37,
++    desktop_device_Unknown38,
++    desktop_device_Unknown39,
++    desktop_device_Unknown40,
++    desktop_device_Unknown41,
++    desktop_device_Unknown42,
++    desktop_device_Unknown43,
++    desktop_device_Unknown44,
++    desktop_device_Unknown45,
++    desktop_device_Unknown46,
++    desktop_device_Unknown47,
++    desktop_device_Unknown48,
++    desktop_device_Unknown49,
++    desktop_device_Unknown50,
++    desktop_device_Unknown51,
++    desktop_device_Unknown52,
++    desktop_device_Unknown53,
++    desktop_device_Unknown54,
++    desktop_device_Unknown55,
++    desktop_device_Unknown56,
++    desktop_device_Unknown57,
++    desktop_device_Unknown58,
++    desktop_device_Unknown59,
++    desktop_device_Unknown60,
++    desktop_device_Unknown61,
++    desktop_device_Unknown62,
++    desktop_device_Unknown63,
++    desktop_device_Unknown64,
++    desktop_device_Unknown65,
++    desktop_device_Unknown66,
++    desktop_device_Unknown67,
++    desktop_device_Unknown68,
++    desktop_device_Unknown69,
++    desktop_device_Unknown70,
++    desktop_device_Unknown71,
++    desktop_device_Unknown72,
++    desktop_device_Unknown73,
++    desktop_device_Unknown74,
++    desktop_device_Unknown75,
++    desktop_device_Unknown76,
++    desktop_device_Unknown77,
++    desktop_device_Unknown78,
++    desktop_device_Unknown79,
++    desktop_device_Unknown80,
++    desktop_device_Unknown81,
++    desktop_device_Unknown82,
++    desktop_device_Unknown83,
++    desktop_device_Unknown84,
++    desktop_device_Unknown85,
++    desktop_device_Unknown86,
++    desktop_device_Unknown87,
++    desktop_device_Unknown88,
++    desktop_device_Unknown89,
++    desktop_device_Unknown90,
++    desktop_device_Unknown91,
++    desktop_device_Unknown92,
++    desktop_device_Unknown93,
++    desktop_device_Unknown94,
++    desktop_device_Unknown95,
++    desktop_device_Unknown96,
++    desktop_device_Unknown97,
++    desktop_device_Unknown98,
++    desktop_device_Unknown99,
++};
++
++static HRESULT create_device(int version, REFIID iid, void **out)
++{
++    struct composition_device *device;
++    HRESULT hr;
++
++    if (!out)
++        return E_INVALIDARG;
++
++    device = calloc(1, sizeof(*device));
++    if (!device)
++        return E_OUTOFMEMORY;
++
++    list_init(&device->targets);
++    device->IDCompositionDevice_iface.lpVtbl = &device_vtbl;
++    device->IDCompositionDeviceUnknown_iface.lpVtbl = &desktop_device_vtbl;
++    device->version = version;
++    device->ref = 1;
++    hr = IDCompositionDevice_QueryInterface(&device->IDCompositionDevice_iface, iid, out);
++    IDCompositionDevice_Release(&device->IDCompositionDevice_iface);
++    return hr;
++}
++
++HRESULT WINAPI DCompositionCreateDevice(IDXGIDevice *dxgi_device, REFIID iid, void **device)
++{
++    TRACE("%p, %s, %p\n", dxgi_device, debugstr_guid(iid), device);
++
++    if (!IsEqualIID(iid, &IID_IDCompositionDevice))
++        return E_NOINTERFACE;
++
++    return create_device(1, iid, device);
++}
++
++HRESULT WINAPI DCompositionCreateDevice2(IUnknown *rendering_device, REFIID iid, void **device)
++{
++    TRACE("%p, %s, %p\n", rendering_device, debugstr_guid(iid), device);
++
++    if (!IsEqualIID(iid, &IID_IDCompositionDevice)
++            && !IsEqualIID(iid, &IID_IDCompositionDesktopDevice))
++        return E_NOINTERFACE;
++
++    return create_device(2, iid, device);
++}
++
+ HRESULT WINAPI DCompositionCreateDevice3(IUnknown *rendering_device, REFIID iid, void **device)
+ {
+     FIXME("%p, %s, %p.\n", rendering_device, debugstr_guid(iid), device);
+ 
++    if (!IsEqualIID(iid, &IID_IDCompositionDevice)
++            && !IsEqualIID(iid, &IID_IDCompositionDesktopDevice))
++        return E_NOINTERFACE;
++
++    return create_device(3, iid, device);
++}
++
++HRESULT WINAPI DCompositionCreateSharedVisualHandle(HANDLE *handle)
++{
++    FIXME("handle %p stub!\n", handle);
++
++    if (!handle)
++        return STATUS_INVALID_PARAMETER;
++
++    /* See shared_visual_target_get_root(): no server-side shared visuals. */
++    *handle = NULL;
+     return E_NOTIMPL;
+ }
+diff --git a/dlls/dcomp/surface.c b/dlls/dcomp/surface.c
+new file mode 100644
+index 0000000..74f5131
+--- /dev/null
++++ b/dlls/dcomp/surface.c
+@@ -0,0 +1,1224 @@
++/*
++ * Copyright 2025 Zhiyi Zhang for CodeWeavers
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++#include <stdarg.h>
++#include <assert.h>
++
++#define COBJMACROS
++#include "windef.h"
++#include "winbase.h"
++#include "dcomp_private.h"
++#include "wine/debug.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(dcomp);
++
++static HRESULT STDMETHODCALLTYPE surface_QueryInterface(IDCompositionSurfaceUnknown *iface, REFIID iid, void **out)
++{
++    TRACE("iface %p, iid %s, out %p!\n", iface, debugstr_guid(iid), out);
++
++    if (IsEqualGUID(iid, &IID_IUnknown)
++            || IsEqualGUID(iid, &IID_IDCompositionSurface)
++            || IsEqualGUID(iid, &IID_IDCompositionSurfaceUnknown))
++    {
++        IUnknown_AddRef(iface);
++        *out = iface;
++        return S_OK;
++    }
++
++    FIXME("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(iid));
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++
++static ULONG STDMETHODCALLTYPE surface_AddRef(IDCompositionSurfaceUnknown *iface)
++{
++    struct composition_surface *surface = impl_from_IDCompositionSurfaceUnknown(iface);
++    ULONG ref = InterlockedIncrement(&surface->ref);
++
++    TRACE("iface %p, ref %lu.\n", iface, ref);
++    return ref;
++}
++
++static ULONG STDMETHODCALLTYPE surface_Release(IDCompositionSurfaceUnknown *iface)
++{
++    struct composition_surface *surface = impl_from_IDCompositionSurfaceUnknown(iface);
++    ULONG ref = InterlockedDecrement(&surface->ref);
++
++    TRACE("iface %p, ref %lu.\n", iface, ref);
++
++    if (!ref)
++    {
++        IUnknown_Release(surface->physical_surface);
++        IDCompositionSurfaceFactory_Release(surface->factory);
++        if (surface->draw_surface)
++            ID3D11Texture2D_Release(surface->draw_surface);
++        free(surface);
++    }
++
++    return ref;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_BeginDraw(IDCompositionSurfaceUnknown *iface,
++        const RECT *rect, REFIID iid, void **object, POINT *offset)
++{
++    struct composition_surface *surface = impl_from_IDCompositionSurfaceUnknown(iface);
++    struct composition_surface_factory *factory = impl_from_IDCompositionSurfaceFactory(surface->factory);
++    struct composition_device *device = impl_from_IDCompositionDevice(factory->device);
++    D3D11_TEXTURE2D_DESC texture_desc;
++    ID3D11Texture2D *draw_surface;
++    ID3D11Device *d3d11_device;
++    RECT whole_rect;
++    HRESULT hr;
++
++    TRACE("iface %p, rect %s, iid %s, object %p, offset %p.\n", iface, wine_dbgstr_rect(rect),
++            debugstr_guid(iid), object, offset);
++
++    if (IsEqualGUID(iid, &IID_ID2D1DeviceContext))
++    {
++        FIXME("ID2D1DeviceContext draw surface is currently unsupported.\n");
++        return E_NOTIMPL;
++    }
++
++    if (!rect)
++    {
++        SetRect(&whole_rect, 0, 0, surface->width, surface->height);
++        rect = &whole_rect;
++    }
++
++    /* TODO: Check if IDCompositionSurface is virtual when virtual IDCompositionSurface is implemented */
++
++    /* The first BeginDraw must use the whole surface for non-virtual IDCompositionSurface */
++    if (!surface->draw_surface && !(rect->left == 0 && rect->top == 0
++            && rect->right == surface->width && rect->bottom == surface->height))
++        return E_INVALIDARG;
++
++    if (rect->left < 0 || rect->top < 0 || rect->right > surface->width
++            || rect->bottom > surface->height)
++        return E_INVALIDARG;
++
++    if (!object || !offset)
++        return E_INVALIDARG;
++
++    if (!surface->draw_surface)
++    {
++        if (!IsEqualGUID(&factory->rendering_device_iid, &IID_IDXGIDevice))
++        {
++            ERR("Only IDCompositionSurfaceFactory created with an IDXGIDevice rendering device is "
++                    "currently supported, rendering device guid %s.\n",
++                    wine_dbgstr_guid(&factory->rendering_device_iid));
++            return E_NOTIMPL;
++        }
++
++        hr = IUnknown_QueryInterface(factory->rendering_device, &IID_ID3D11Device, (void **)&d3d11_device);
++        if (FAILED(hr))
++        {
++            FIXME("Failed to get a d3d11 device, should a new one be created?\n");
++            return hr;
++        }
++
++        texture_desc.Width = surface->width;
++        texture_desc.Height = surface->height;
++        texture_desc.MipLevels = 1;
++        texture_desc.ArraySize = 1;
++        texture_desc.Format = surface->pixel_format;
++        texture_desc.SampleDesc.Count = 1;
++        texture_desc.SampleDesc.Quality = 0;
++        texture_desc.Usage = D3D11_USAGE_DEFAULT;
++        texture_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
++        texture_desc.CPUAccessFlags = 0;
++        texture_desc.MiscFlags = D3D11_RESOURCE_MISC_GUARDED;
++        if (surface->pixel_format == DXGI_FORMAT_B8G8R8A8_UNORM)
++            texture_desc.MiscFlags |= D3D11_RESOURCE_MISC_GDI_COMPATIBLE;
++        hr = ID3D11Device_CreateTexture2D(d3d11_device, &texture_desc, NULL, &draw_surface);
++        ID3D11Device_Release(d3d11_device);
++        if (FAILED(hr))
++        {
++            ERR("Failed to create a draw surface.\n");
++            return hr;
++        }
++
++        if (InterlockedCompareExchangePointer((void **)&surface->draw_surface, draw_surface, 0))
++            ID3D11Texture2D_Release(draw_surface);
++    }
++
++    dcomp_lock();
++    if (device->drawing_surface && device->drawing_surface != &surface->IDCompositionSurfaceUnknown_iface)
++    {
++        dcomp_unlock();
++        return DCOMPOSITION_ERROR_SURFACE_BEING_RENDERED;
++    }
++    device->drawing_surface = &surface->IDCompositionSurfaceUnknown_iface;
++    dcomp_unlock();
++
++    hr = IUnknown_QueryInterface(surface->draw_surface, iid, object);
++    if (FAILED(hr))
++        return hr;
++
++    offset->x = rect->left;
++    offset->y = rect->top;
++    surface->draw_rect = *rect;
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_EndDraw(IDCompositionSurfaceUnknown *iface)
++{
++    struct composition_surface *surface = impl_from_IDCompositionSurfaceUnknown(iface);
++    struct composition_surface_factory *factory = impl_from_IDCompositionSurfaceFactory(surface->factory);
++    struct composition_device *device = impl_from_IDCompositionDevice(factory->device);
++    ID3D11Resource *dst_resource, *src_resource;
++    ID3D11DeviceContext *d3d11_device_context;
++    ID3D11Device *d3d11_device;
++    D3D11_BOX box;
++    HRESULT hr;
++
++    TRACE("iface %p.\n", iface);
++
++    dcomp_lock();
++    if (!(device->drawing_surface && device->drawing_surface == &surface->IDCompositionSurfaceUnknown_iface))
++    {
++        dcomp_unlock();
++        return DCOMPOSITION_ERROR_SURFACE_NOT_BEING_RENDERED;
++    }
++    device->drawing_surface = NULL;
++    dcomp_unlock();
++
++    /* TODO: Copy data after Commit() is called instead of doing it immediately here */
++
++    if (!IsEqualGUID(&factory->rendering_device_iid, &IID_IDXGIDevice))
++    {
++        ERR("Only IDCompositionSurfaceFactory created with an IDXGIDevice rendering device is "
++                "currently supported, rendering device guid %s.\n",
++                wine_dbgstr_guid(&factory->rendering_device_iid));
++        return E_NOTIMPL;
++    }
++
++    hr = IUnknown_QueryInterface(factory->rendering_device, &IID_ID3D11Device, (void **)&d3d11_device);
++    if (FAILED(hr))
++    {
++        FIXME("Failed to get a d3d11 device, should a new one be created?\n");
++        return hr;
++    }
++
++    hr = ID3D11Texture2D_QueryInterface(surface->draw_surface, &IID_ID3D11Resource, (void **)&src_resource);
++    if (FAILED(hr))
++    {
++        FIXME("Failed to get the source ID3D11Resource.\n");
++        ID3D11Device_Release(d3d11_device);
++        return hr;
++    }
++
++    hr = IUnknown_QueryInterface(surface->physical_surface, &IID_ID3D11Resource, (void **)&dst_resource);
++    if (FAILED(hr))
++    {
++        FIXME("Failed to get the destination ID3D11Resource.\n");
++        ID3D11Resource_Release(src_resource);
++        ID3D11Device_Release(d3d11_device);
++        return hr;
++    }
++
++    box.left = surface->draw_rect.left;
++    box.top = surface->draw_rect.top;
++    box.front = 0;
++    box.right = surface->draw_rect.right;
++    box.bottom = surface->draw_rect.bottom;
++    box.back = 1;
++
++    ID3D11Device_GetImmediateContext(d3d11_device, &d3d11_device_context);
++    ID3D11DeviceContext_CopySubresourceRegion(d3d11_device_context, dst_resource, 0,
++            surface->draw_rect.left, surface->draw_rect.top, 0, src_resource, 0, &box);
++    ID3D11DeviceContext_Release(d3d11_device_context);
++    ID3D11Resource_Release(dst_resource);
++    ID3D11Resource_Release(src_resource);
++    ID3D11Device_Release(d3d11_device);
++
++    SetRectEmpty(&surface->draw_rect);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_SuspendDraw(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_ResumeDraw(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Scroll(IDCompositionSurfaceUnknown *iface, const RECT *scroll,
++        const RECT *clip, int offset_x, int offset_y)
++{
++    FIXME("iface %p, scroll %s, clip %s, offset_x %d, offset_y %d stub!\n", iface,
++            wine_dbgstr_rect(scroll), wine_dbgstr_rect(clip), offset_x, offset_y);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown1(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown2(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++/* Undocumented. Looks like a resize method. */
++static HRESULT STDMETHODCALLTYPE surface_Unknown3(IDCompositionSurfaceUnknown *iface, UINT width, UINT height)
++{
++    struct composition_surface *surface = impl_from_IDCompositionSurfaceUnknown(iface);
++    struct composition_surface_factory *factory = impl_from_IDCompositionSurfaceFactory(surface->factory);
++    struct composition_device *device = impl_from_IDCompositionDevice(factory->device);
++    IDXGISurface *dxgi_surface;
++    DXGI_SURFACE_DESC desc;
++    HRESULT hr;
++
++    FIXME("iface %p width %d height %d!\n", iface, width, height);
++
++    if (!width || !height)
++        return E_INVALIDARG;
++
++    dcomp_lock();
++    if (device->drawing_surface)
++    {
++        dcomp_unlock();
++        return DCOMPOSITION_ERROR_SURFACE_BEING_RENDERED;
++    }
++
++    if (width == surface->width && height == surface->height)
++    {
++        dcomp_unlock();
++        return S_OK;
++    }
++
++    IUnknown_Release(surface->physical_surface);
++    if (surface->draw_surface)
++    {
++        ID3D11Texture2D_Release(surface->draw_surface);
++        surface->draw_surface = NULL;
++    }
++
++    desc.Width = width;
++    desc.Height = height;
++    desc.Format = surface->pixel_format;
++    desc.SampleDesc.Count = 1;
++    desc.SampleDesc.Quality = 0;
++    hr = IDXGIDevice_CreateSurface((IDXGIDevice *)factory->rendering_device, &desc, 1,
++            DXGI_USAGE_BACK_BUFFER | DXGI_USAGE_SHADER_INPUT, NULL, &dxgi_surface);
++    if (FAILED(hr))
++    {
++        dcomp_unlock();
++        ERR("Failed to create a IDXGISurface.\n");
++        return hr;
++    }
++
++    surface->width = width;
++    surface->height = height;
++    surface->physical_surface = (IUnknown *)dxgi_surface;
++    dcomp_unlock();
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown4(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown5(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown6(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown7(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown8(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown9(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown10(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown11(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown12(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown13(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown14(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown15(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown16(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown17(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown18(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown19(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown20(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown21(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown22(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown23(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown24(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown25(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown26(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown27(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown28(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown29(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown30(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown31(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown32(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown33(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown34(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown35(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown36(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown37(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown38(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown39(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown40(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown41(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown42(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown43(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown44(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown45(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown46(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown47(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown48(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown49(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown50(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown51(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown52(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown53(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown54(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown55(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown56(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown57(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown58(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown59(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown60(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown61(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown62(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown63(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown64(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown65(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown66(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown67(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown68(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown69(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown70(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown71(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown72(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown73(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown74(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown75(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown76(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown77(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown78(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown79(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown80(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown81(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown82(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown83(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown84(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown85(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown86(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown87(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown88(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown89(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown90(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown91(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown92(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown93(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown94(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown95(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown96(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown97(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown98(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE surface_Unknown99(IDCompositionSurfaceUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static const struct IDCompositionSurfaceUnknownVtbl surface_vtbl =
++{
++    /* IUnknown methods */
++    surface_QueryInterface,
++    surface_AddRef,
++    surface_Release,
++    /* IDCompositionSurface methods */
++    surface_BeginDraw,
++    surface_EndDraw,
++    surface_SuspendDraw,
++    surface_ResumeDraw,
++    surface_Scroll,
++    /* IDCompositionSurfaceUnknown methods */
++    surface_Unknown1,
++    surface_Unknown2,
++    surface_Unknown3,
++    surface_Unknown4,
++    surface_Unknown5,
++    surface_Unknown6,
++    surface_Unknown7,
++    surface_Unknown8,
++    surface_Unknown9,
++    surface_Unknown10,
++    surface_Unknown11,
++    surface_Unknown12,
++    surface_Unknown13,
++    surface_Unknown14,
++    surface_Unknown15,
++    surface_Unknown16,
++    surface_Unknown17,
++    surface_Unknown18,
++    surface_Unknown19,
++    surface_Unknown20,
++    surface_Unknown21,
++    surface_Unknown22,
++    surface_Unknown23,
++    surface_Unknown24,
++    surface_Unknown25,
++    surface_Unknown26,
++    surface_Unknown27,
++    surface_Unknown28,
++    surface_Unknown29,
++    surface_Unknown30,
++    surface_Unknown31,
++    surface_Unknown32,
++    surface_Unknown33,
++    surface_Unknown34,
++    surface_Unknown35,
++    surface_Unknown36,
++    surface_Unknown37,
++    surface_Unknown38,
++    surface_Unknown39,
++    surface_Unknown40,
++    surface_Unknown41,
++    surface_Unknown42,
++    surface_Unknown43,
++    surface_Unknown44,
++    surface_Unknown45,
++    surface_Unknown46,
++    surface_Unknown47,
++    surface_Unknown48,
++    surface_Unknown49,
++    surface_Unknown50,
++    surface_Unknown51,
++    surface_Unknown52,
++    surface_Unknown53,
++    surface_Unknown54,
++    surface_Unknown55,
++    surface_Unknown56,
++    surface_Unknown57,
++    surface_Unknown58,
++    surface_Unknown59,
++    surface_Unknown60,
++    surface_Unknown61,
++    surface_Unknown62,
++    surface_Unknown63,
++    surface_Unknown64,
++    surface_Unknown65,
++    surface_Unknown66,
++    surface_Unknown67,
++    surface_Unknown68,
++    surface_Unknown69,
++    surface_Unknown70,
++    surface_Unknown71,
++    surface_Unknown72,
++    surface_Unknown73,
++    surface_Unknown74,
++    surface_Unknown75,
++    surface_Unknown76,
++    surface_Unknown77,
++    surface_Unknown78,
++    surface_Unknown79,
++    surface_Unknown80,
++    surface_Unknown81,
++    surface_Unknown82,
++    surface_Unknown83,
++    surface_Unknown84,
++    surface_Unknown85,
++    surface_Unknown86,
++    surface_Unknown87,
++    surface_Unknown88,
++    surface_Unknown89,
++    surface_Unknown90,
++    surface_Unknown91,
++    surface_Unknown92,
++    surface_Unknown93,
++    surface_Unknown94,
++    surface_Unknown95,
++    surface_Unknown96,
++    surface_Unknown97,
++    surface_Unknown98,
++    surface_Unknown99,
++};
++
++struct composition_surface *unsafe_impl_from_IDCompositionSurface(IDCompositionSurface *iface)
++{
++    if (!iface)
++        return NULL;
++    assert((void *)iface->lpVtbl == (void *)&surface_vtbl);
++    return CONTAINING_RECORD(iface, struct composition_surface, IDCompositionSurfaceUnknown_iface);
++}
++
++HRESULT create_surface(struct composition_surface_factory *factory, UINT width, UINT height,
++        DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode, IDCompositionSurface **dcomp_surface)
++{
++    struct composition_surface *surface;
++    const GUID *physical_surface_iid;
++    IUnknown *physical_surface;
++    HRESULT hr;
++
++    if (!width || !height)
++        return E_INVALIDARG;
++
++    if (pixel_format != DXGI_FORMAT_B8G8R8A8_UNORM && pixel_format != DXGI_FORMAT_R8G8B8A8_UNORM
++            && pixel_format != DXGI_FORMAT_R16G16B16A16_FLOAT)
++        return E_INVALIDARG;
++
++    if (alpha_mode == DXGI_ALPHA_MODE_UNSPECIFIED)
++        alpha_mode = DXGI_ALPHA_MODE_IGNORE;
++
++    if (alpha_mode != DXGI_ALPHA_MODE_PREMULTIPLIED && alpha_mode != DXGI_ALPHA_MODE_IGNORE)
++        return E_INVALIDARG;
++
++    if (IsEqualGUID(&factory->rendering_device_iid, &IID_IDXGIDevice))
++    {
++        IDXGISurface *dxgi_surface;
++        DXGI_SURFACE_DESC desc;
++
++        desc.Width = width;
++        desc.Height = height;
++        desc.Format = pixel_format;
++        desc.SampleDesc.Count = 1;
++        desc.SampleDesc.Quality = 0;
++        /* TODO: What about alpha_mode ? */
++
++        hr = IDXGIDevice_CreateSurface((IDXGIDevice *)factory->rendering_device, &desc, 1,
++                DXGI_USAGE_BACK_BUFFER | DXGI_USAGE_SHADER_INPUT, NULL, &dxgi_surface);
++        if (FAILED(hr))
++        {
++            ERR("Failed to create a IDXGISurface.\n");
++            return hr;
++        }
++
++        physical_surface = (IUnknown *)dxgi_surface;
++        physical_surface_iid = &IID_IDXGISurface;
++    }
++    else
++    {
++        FIXME("Only IDCompositionSurfaceFactory created with an IDXGIDevice rendering device is "
++              "currently supported, rendering device guid %s.\n",
++              wine_dbgstr_guid(&factory->rendering_device_iid));
++        return E_NOTIMPL;
++    }
++
++    surface = calloc(1, sizeof(*surface));
++    if (!surface)
++        return E_OUTOFMEMORY;
++
++    surface->IDCompositionSurfaceUnknown_iface.lpVtbl = &surface_vtbl;
++    surface->factory = &factory->IDCompositionSurfaceFactory_iface;
++    IDCompositionSurfaceFactory_AddRef(surface->factory);
++    surface->physical_surface = physical_surface;
++    surface->physical_surface_iid = *physical_surface_iid;
++    surface->width = width;
++    surface->height = height;
++    surface->pixel_format = pixel_format;
++    surface->alpha_mode = alpha_mode;
++    surface->ref = 1;
++
++    *dcomp_surface = (IDCompositionSurface *)&surface->IDCompositionSurfaceUnknown_iface;
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE factory_QueryInterface(IDCompositionSurfaceFactory *iface, REFIID iid, void **out)
++{
++    TRACE("iface %p, iid %s, out %p!\n", iface, debugstr_guid(iid), out);
++
++    if (IsEqualGUID(iid, &IID_IUnknown)
++            || IsEqualGUID(iid, &IID_IDCompositionSurfaceFactory))
++    {
++        IUnknown_AddRef(iface);
++        *out = iface;
++        return S_OK;
++    }
++
++    FIXME("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(iid));
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++
++static ULONG STDMETHODCALLTYPE factory_AddRef(IDCompositionSurfaceFactory *iface)
++{
++    struct composition_surface_factory *factory = impl_from_IDCompositionSurfaceFactory(iface);
++    ULONG ref = InterlockedIncrement(&factory->ref);
++
++    TRACE("iface %p, ref %lu.\n", iface, ref);
++    return ref;
++}
++
++static ULONG STDMETHODCALLTYPE factory_Release(IDCompositionSurfaceFactory *iface)
++{
++    struct composition_surface_factory *factory = impl_from_IDCompositionSurfaceFactory(iface);
++    ULONG ref = InterlockedDecrement(&factory->ref);
++
++    TRACE("iface %p, ref %lu.\n", iface, ref);
++
++    if (!ref)
++    {
++        IDCompositionDevice_Release(factory->device);
++        IUnknown_Release(factory->rendering_device);
++        free(factory);
++    }
++
++    return ref;
++}
++
++static HRESULT STDMETHODCALLTYPE factory_CreateSurface(IDCompositionSurfaceFactory *iface,
++        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
++        IDCompositionSurface **surface)
++{
++    struct composition_surface_factory *factory = impl_from_IDCompositionSurfaceFactory(iface);
++
++    FIXME("iface %p, width %u, height %u, format %#x, alpha_mode %#x, surface %p semi-stub!\n", iface,
++            width, height, pixel_format, alpha_mode, surface);
++
++    return create_surface(factory, width, height, pixel_format, alpha_mode, surface);
++}
++
++static HRESULT STDMETHODCALLTYPE factory_CreateVirtualSurface(IDCompositionSurfaceFactory *iface,
++        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
++        IDCompositionVirtualSurface **surface)
++{
++    FIXME("iface %p, width %u, height %u, format %#x, alpha_mode %#x, surface %p stub!\n", iface,
++            width, height, pixel_format, alpha_mode, surface);
++    return E_NOTIMPL;
++}
++
++static const struct IDCompositionSurfaceFactoryVtbl factory_vtbl =
++{
++    /* IUnknown methods */
++    factory_QueryInterface,
++    factory_AddRef,
++    factory_Release,
++    /* IDCompositionSurfaceFactory methods */
++    factory_CreateSurface,
++    factory_CreateVirtualSurface,
++};
++
++HRESULT create_surface_factory(struct composition_device *device, IUnknown *rendering_device,
++        IDCompositionSurfaceFactory **obj)
++{
++    struct composition_surface_factory *factory;
++    IDXGIDevice *dxgi_device;
++    ID2D1Device *d2d_device;
++    const GUID *iid;
++
++    if (!rendering_device)
++        return E_INVALIDARG;
++
++    if (SUCCEEDED(IUnknown_QueryInterface(rendering_device, &IID_IDXGIDevice, (void *)&dxgi_device)))
++    {
++        TRACE("Creating a surface factory with an IDXGIDevice rendering device.\n");
++        iid = &IID_IDXGIDevice;
++    }
++    else if (SUCCEEDED(IUnknown_QueryInterface(rendering_device, &IID_ID2D1Device, (void *)&d2d_device)))
++    {
++        TRACE("Creating a surface factory with an IID_ID2D1Device rendering device.\n");
++        iid = &IID_ID2D1Device;
++    }
++    else
++    {
++        ERR("Unknown rendering device.\n");
++        return E_NOINTERFACE;
++    }
++
++    factory = calloc(1, sizeof(*factory));
++    if (!factory)
++        return E_OUTOFMEMORY;
++
++    factory->IDCompositionSurfaceFactory_iface.lpVtbl = &factory_vtbl;
++    factory->ref = 1;
++    factory->rendering_device = IsEqualGUID(iid, &IID_IDXGIDevice) ? (IUnknown *)dxgi_device : (IUnknown *)d2d_device;
++    factory->rendering_device_iid = *iid;
++    factory->device = &device->IDCompositionDevice_iface;
++    IDCompositionDevice_AddRef(&device->IDCompositionDevice_iface);
++
++    *obj = &factory->IDCompositionSurfaceFactory_iface;
++    return S_OK;
++}
+diff --git a/dlls/dcomp/target.c b/dlls/dcomp/target.c
+new file mode 100644
+index 0000000..8a4da8b
+--- /dev/null
++++ b/dlls/dcomp/target.c
+@@ -0,0 +1,213 @@
++/*
++ * Copyright 2023 Zhiyi Zhang for CodeWeavers
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#include <stdarg.h>
++
++#define COBJMACROS
++#include "windef.h"
++#include "winbase.h"
++#include "dcomp_private.h"
++#include "wine/server.h"
++#include "wine/debug.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(dcomp);
++
++static const WCHAR *wine_window_topmost_composed = L"wine_window_topmost_composed";
++static const WCHAR *wine_window_non_topmost_composed = L"wine_window_non_topmost_composed";
++
++static HRESULT STDMETHODCALLTYPE target_QueryInterface(IDCompositionTarget *iface, REFIID iid, void **out)
++{
++    TRACE("iface %p, iid %s, out %p!\n", iface, debugstr_guid(iid), out);
++
++    if (IsEqualGUID(iid, &IID_IUnknown)
++            || IsEqualGUID(iid, &IID_IDCompositionTarget))
++    {
++        IUnknown_AddRef(iface);
++        *out = iface;
++        return S_OK;
++    }
++
++    FIXME("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(iid));
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++
++static ULONG STDMETHODCALLTYPE target_AddRef(IDCompositionTarget *iface)
++{
++    struct composition_target *target = impl_from_IDCompositionTarget(iface);
++    ULONG ref = InterlockedIncrement(&target->ref);
++
++    TRACE("iface %p, ref %lu.\n", iface, ref);
++    return ref;
++}
++
++static ULONG STDMETHODCALLTYPE target_Release(IDCompositionTarget *iface)
++{
++    struct composition_target *target = impl_from_IDCompositionTarget(iface);
++    ULONG ref = InterlockedDecrement(&target->ref);
++    struct composition_visual *root_visual;
++    const WCHAR *prop;
++
++    TRACE("iface %p, ref %lu.\n", iface, ref);
++
++    if (!ref)
++    {
++        prop = target->topmost ? wine_window_topmost_composed : wine_window_non_topmost_composed;
++        RemovePropW(target->hwnd, prop);
++
++        dcomp_lock();
++        list_remove(&target->entry);
++        dcomp_unlock();
++        IDCompositionDevice_Release(target->device);
++        if (target->root)
++        {
++            root_visual = impl_from_IDCompositionVisual(target->root);
++            root_visual->is_root = FALSE;
++            IDCompositionVisual_Release(target->root);
++        }
++        if (target->shared_visual_handle)
++            CloseHandle(target->shared_visual_handle);
++        free(target);
++    }
++
++    return ref;
++}
++
++static void shared_visual_target_set_root(HANDLE shared_visual_handle, IDCompositionVisual *root)
++{
++    /* See shared_visual_target_get_root() in device.c. */
++    ERR("shared visual %p not supported.\n", shared_visual_handle);
++}
++
++static HRESULT STDMETHODCALLTYPE target_SetRoot(IDCompositionTarget *iface,
++        IDCompositionVisual *visual)
++{
++    struct composition_target *target = impl_from_IDCompositionTarget(iface);
++    struct composition_visual *composition_visual;
++
++    TRACE("iface %p, visual %p\n", iface, visual);
++
++    dcomp_lock();
++
++    if (visual)
++    {
++        composition_visual = impl_from_IDCompositionVisual(visual);
++        if (composition_visual->is_root)
++        {
++            dcomp_unlock();
++            return E_INVALIDARG;
++        }
++
++        composition_visual->is_root = TRUE;
++        IDCompositionVisual_AddRef(visual);
++    }
++
++    if (target->root)
++    {
++        composition_visual = impl_from_IDCompositionVisual(target->root);
++        composition_visual->is_root = FALSE;
++        IDCompositionVisual_Release(target->root);
++    }
++    target->root = visual;
++
++    if (target->shared_visual_handle)
++        shared_visual_target_set_root(target->shared_visual_handle, target->root);
++
++    dcomp_unlock();
++    return S_OK;
++}
++
++static const struct IDCompositionTargetVtbl target_vtbl =
++{
++    /* IUnknown methods */
++    target_QueryInterface,
++    target_AddRef,
++    target_Release,
++    /* IDCompositionTarget methods */
++    target_SetRoot,
++};
++
++HRESULT create_target(struct composition_device *device, HWND hwnd, BOOL topmost,
++        IDCompositionTarget **new_target)
++{
++    struct composition_target *target;
++    const WCHAR *prop;
++    DWORD pid = 0;
++
++    if (!hwnd || hwnd == GetDesktopWindow() || !new_target)
++        return E_INVALIDARG;
++
++    GetWindowThreadProcessId(hwnd, &pid);
++    if (pid != GetCurrentProcessId())
++        return E_ACCESSDENIED;
++
++    if ((topmost && GetPropW(hwnd, wine_window_topmost_composed))
++            || (!topmost && GetPropW(hwnd, wine_window_non_topmost_composed)))
++        return DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED;
++
++    target = calloc(1, sizeof(*target));
++    if (!target)
++        return E_OUTOFMEMORY;
++
++    IDCompositionDevice_AddRef(&device->IDCompositionDevice_iface);
++    dcomp_lock();
++    list_add_tail(&device->targets, &target->entry);
++    dcomp_unlock();
++    target->IDCompositionTarget_iface.lpVtbl = &target_vtbl;
++    target->ref = 1;
++    target->hwnd = hwnd;
++    target->topmost = topmost;
++    target->device = &device->IDCompositionDevice_iface;
++    *new_target = &target->IDCompositionTarget_iface;
++
++    prop = target->topmost ? wine_window_topmost_composed : wine_window_non_topmost_composed;
++    SetPropW(target->hwnd, prop, (HANDLE)1);
++    return S_OK;
++}
++
++
++HRESULT create_target_from_shared_visual_handle(struct composition_device *device, HANDLE shared_visual_handle, void **new_target)
++{
++    struct composition_target *target;
++    HANDLE handle;
++
++    if (!DuplicateHandle(GetCurrentProcess(), shared_visual_handle, GetCurrentProcess(), &handle, 0,
++                         FALSE, DUPLICATE_SAME_ACCESS))
++    {
++        ERR("Cannot duplicate handle, last error %lu.\n", GetLastError());
++        return E_FAIL;
++    }
++
++    target = calloc(1, sizeof(*target));
++    if (!target)
++    {
++        CloseHandle(handle);
++        return E_OUTOFMEMORY;
++    }
++
++    IDCompositionDevice_AddRef(&device->IDCompositionDevice_iface);
++    dcomp_lock();
++    list_add_tail(&device->targets, &target->entry);
++    dcomp_unlock();
++    target->IDCompositionTarget_iface.lpVtbl = &target_vtbl;
++    target->ref = 1;
++    target->device = &device->IDCompositionDevice_iface;
++    target->shared_visual_handle = handle;
++    *new_target = &target->IDCompositionTarget_iface;
++    return S_OK;
++}
+diff --git a/dlls/dcomp/visual.c b/dlls/dcomp/visual.c
+new file mode 100644
+index 0000000..c4ff363
+--- /dev/null
++++ b/dlls/dcomp/visual.c
+@@ -0,0 +1,1211 @@
++/*
++ * Copyright 2023 Zhiyi Zhang for CodeWeavers
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#include <assert.h>
++#include <stdarg.h>
++
++#define COBJMACROS
++#include "windef.h"
++#include "winbase.h"
++#include "dcomp_private.h"
++#include "wine/debug.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(dcomp);
++
++static HRESULT STDMETHODCALLTYPE visual_QueryInterface(IDCompositionVisualUnknown *iface, REFIID iid,
++        void **out)
++{
++    struct composition_visual *visual = impl_from_IDCompositionVisualUnknown(iface);
++
++    TRACE("iface %p, iid %s, out %p stub!\n", iface, debugstr_guid(iid), out);
++
++    if (IsEqualGUID(iid, &IID_IUnknown)
++            || IsEqualGUID(iid, &IID_IDCompositionVisual)
++            || (visual->version >= 2 && IsEqualGUID(iid, &IID_IDCompositionVisual2))
++            || IsEqualGUID(iid, &IID_IDCompositionVisualUnknown))
++    {
++        IUnknown_AddRef(&visual->IDCompositionVisualUnknown_iface);
++        *out = &visual->IDCompositionVisualUnknown_iface;
++        return S_OK;
++    }
++
++    FIXME("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(iid));
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++
++static ULONG STDMETHODCALLTYPE visual_AddRef(IDCompositionVisualUnknown *iface)
++{
++    struct composition_visual *visual = impl_from_IDCompositionVisualUnknown(iface);
++    ULONG ref = InterlockedIncrement(&visual->ref);
++
++    TRACE("iface %p, ref %lu.\n", iface, ref);
++    return ref;
++}
++
++static ULONG STDMETHODCALLTYPE visual_Release(IDCompositionVisualUnknown *iface)
++{
++    struct composition_visual *visual = impl_from_IDCompositionVisualUnknown(iface);
++    ULONG ref = InterlockedDecrement(&visual->ref);
++    struct composition_visual *child;
++
++    TRACE("iface %p, ref %lu.\n", iface, ref);
++
++    if (!ref)
++    {
++        if (visual->interop)
++            ID2D1GdiInteropRenderTarget_Release(visual->interop);
++        if (visual->device_context)
++            ID2D1DeviceContext_Release(visual->device_context);
++        if (visual->content)
++            IUnknown_Release(visual->content);
++        if (visual->shared_visual_handle)
++            CloseHandle(visual->shared_visual_handle);
++        dcomp_lock();
++        if (visual->is_child)
++            list_remove(&visual->entry);
++        LIST_FOR_EACH_ENTRY(child, &visual->child_visuals, struct composition_visual, entry)
++        {
++            list_remove(&child->entry);
++            child->is_child = FALSE;
++            child->parent = NULL;
++        }
++        dcomp_unlock();
++        free(visual);
++    }
++
++    return ref;
++}
++
++static HRESULT STDMETHODCALLTYPE visual_SetOffsetXAnimation(IDCompositionVisualUnknown *iface,
++        IDCompositionAnimation *animation)
++{
++    FIXME("iface %p, animation %p stub!\n", iface, animation);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE visual_SetOffsetX(IDCompositionVisualUnknown *iface, float offset_x)
++{
++    struct composition_visual *visual = impl_from_IDCompositionVisualUnknown(iface);
++
++    TRACE("iface %p, offset_x %f.\n", iface, offset_x);
++
++    visual->offset_x = offset_x;
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE visual_SetOffsetYAnimation(IDCompositionVisualUnknown *iface,
++        IDCompositionAnimation *animation)
++{
++    FIXME("iface %p, animation %p stub!\n", iface, animation);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE visual_SetOffsetY(IDCompositionVisualUnknown *iface, float offset_y)
++{
++    FIXME("iface %p, offset_y %f stub!\n", iface, offset_y);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE visual_SetTransformObject(IDCompositionVisualUnknown *iface,
++        IDCompositionTransform *transform)
++{
++    FIXME("iface %p, transform %p stub!\n", iface, transform);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE visual_SetTransform(IDCompositionVisualUnknown *iface,
++        const D2D_MATRIX_3X2_F *matrix)
++{
++    FIXME("iface %p, matrix %p stub!\n", iface, matrix);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE visual_SetTransformParent(IDCompositionVisualUnknown *iface,
++        IDCompositionVisual *visual)
++{
++    FIXME("iface %p, visual %p stub!\n", iface, visual);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE visual_SetEffect(IDCompositionVisualUnknown *iface,
++        IDCompositionEffect *effect)
++{
++    FIXME("iface %p, effect %p stub!\n", iface, effect);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE visual_SetBitmapInterpolationMode(IDCompositionVisualUnknown *iface,
++        enum DCOMPOSITION_BITMAP_INTERPOLATION_MODE interpolation_mode)
++{
++    struct composition_visual *visual = impl_from_IDCompositionVisualUnknown(iface);
++
++    TRACE("iface %p, interpolation_mode %d.\n", iface, interpolation_mode);
++
++    if (interpolation_mode != DCOMPOSITION_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR
++        && interpolation_mode != DCOMPOSITION_BITMAP_INTERPOLATION_MODE_LINEAR
++        && interpolation_mode != DCOMPOSITION_BITMAP_INTERPOLATION_MODE_INHERIT)
++        return E_INVALIDARG;
++
++    visual->interpolation_mode = interpolation_mode;
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE visual_SetBorderMode(IDCompositionVisualUnknown *iface,
++        enum DCOMPOSITION_BORDER_MODE border_mode)
++{
++    struct composition_visual *visual = impl_from_IDCompositionVisualUnknown(iface);
++
++    TRACE("iface %p, border_mode %d.\n", iface, border_mode);
++
++    if (border_mode != DCOMPOSITION_BORDER_MODE_SOFT
++        && border_mode != DCOMPOSITION_BORDER_MODE_HARD
++        && border_mode != DCOMPOSITION_BORDER_MODE_INHERIT)
++        return E_INVALIDARG;
++
++    visual->border_mode = border_mode;
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE visual_SetClipObject(IDCompositionVisualUnknown *iface,
++        IDCompositionClip *clip)
++{
++    FIXME("iface %p, clip %p stub!\n", iface, clip);
++    return E_NOTIMPL;
++}
++
++/* C++ method: SetClip(THIS_ const D2D_RECT_F &rect).  Use pointer instead of reference */
++static HRESULT STDMETHODCALLTYPE visual_SetClip(IDCompositionVisualUnknown *iface, const D2D_RECT_F *rect)
++{
++    FIXME("iface %p, rect %p stub!\n", iface, rect);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE visual_SetContent(IDCompositionVisualUnknown *iface, IUnknown *content)
++{
++    struct composition_visual *visual = impl_from_IDCompositionVisualUnknown(iface);
++    ID2D1GdiInteropRenderTarget *interop;
++    ID2D1DeviceContext *device_context;
++    IDXGISwapChain1 *dxgi_swapchain;
++    IDCompositionSurface *suface;
++    IDXGIDevice *dxgi_device;
++    ID2D1Device *d2d_device;
++    const GUID *iid = NULL;
++    HRESULT hr;
++
++    FIXME("iface %p, content %p semi-stub!\n", iface, content);
++
++    dcomp_lock();
++
++    if (content)
++    {
++        if (SUCCEEDED(IUnknown_QueryInterface(content, &IID_IDXGISwapChain1,
++                (void **)&dxgi_swapchain)))
++        {
++            iid = &IID_IDXGISwapChain1;
++
++            hr = IDXGISwapChain1_GetDevice(dxgi_swapchain, &IID_IDXGIDevice, (void **)&dxgi_device);
++            IDXGISwapChain1_Release(dxgi_swapchain);
++            if (FAILED(hr))
++            {
++                ERR("Failed to get the swapchain device, hr %#lx.\n", hr);
++                dcomp_unlock();
++                return hr;
++            }
++        }
++        else if (SUCCEEDED(IUnknown_QueryInterface(content, &IID_IDCompositionSurface, (void **)&suface)))
++        {
++            struct composition_surface *dcomp_surface = unsafe_impl_from_IDCompositionSurface(suface);
++
++            if (IsEqualGUID(&dcomp_surface->physical_surface_iid, &IID_IDXGISurface))
++            {
++                iid = &IID_IDCompositionSurface;
++
++                hr = IDXGISurface_GetDevice((IDXGISurface *)dcomp_surface->physical_surface,
++                        &IID_IDXGIDevice, (void **)&dxgi_device);
++                IDCompositionSurface_Release(suface);
++                if (FAILED(hr))
++                {
++                    ERR("Failed to get the dxgi surface device, hr %#lx.\n", hr);
++                    dcomp_unlock();
++                    return hr;
++                }
++            }
++            else
++            {
++                FIXME("Only IDCompositionSurface from IDXGISurface is currently supported.\n");
++                IDCompositionSurface_Release(suface);
++                dcomp_unlock();
++                return E_INVALIDARG;
++            }
++        }
++        else
++        {
++            FIXME("Only IDXGISwapChain1 or IDCompositionSurface are currently supported.\n");
++            dcomp_unlock();
++            return E_INVALIDARG;
++        }
++
++        hr = D2D1CreateDevice(dxgi_device, NULL, &d2d_device);
++        IDXGIDevice_Release(dxgi_device);
++        if (FAILED(hr))
++        {
++            ERR("Failed to create a D2D device, hr %#lx.\n", hr);
++            dcomp_unlock();
++            return hr;
++        }
++
++        hr = ID2D1Device_CreateDeviceContext(d2d_device, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
++                &device_context);
++        ID2D1Device_Release(d2d_device);
++        if (FAILED(hr))
++        {
++            ERR("Failed to create a D2D device context, hr %#lx.\n", hr);
++            dcomp_unlock();
++            return hr;
++        }
++
++        if (FAILED(hr = ID2D1DeviceContext_QueryInterface(device_context,
++                &IID_ID2D1GdiInteropRenderTarget, (void **)&interop)))
++        {
++            ERR("Failed to get a ID2D1GdiInteropRenderTarget, hr %#lx.\n", hr);
++            ID2D1DeviceContext_Release(device_context);
++            dcomp_unlock();
++            return hr;
++        }
++    }
++
++    if (visual->interop)
++    {
++        ID2D1GdiInteropRenderTarget_Release(visual->interop);
++        visual->interop = NULL;
++    }
++    if (visual->device_context)
++    {
++        ID2D1DeviceContext_Release(visual->device_context);
++        visual->device_context = NULL;
++    }
++    if (visual->content)
++    {
++        IUnknown_Release(visual->content);
++        visual->content = NULL;
++    }
++
++    if (content)
++    {
++        IUnknown_AddRef(content);
++        visual->content = content;
++        visual->content_iid = *iid;
++        visual->device_context = device_context;
++        visual->interop = interop;
++    }
++
++    dcomp_unlock();
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE visual_AddVisual(IDCompositionVisualUnknown *iface,
++        IDCompositionVisual *visual, BOOL insert_above, IDCompositionVisual *reference_visual)
++{
++    struct composition_visual *parent_visual_impl = impl_from_IDCompositionVisualUnknown(iface);
++    struct composition_visual *child_visual_impl, *ref_visual_impl = NULL;
++
++    FIXME("iface %p, visual %p, insert_above %d, reference_visual %p.\n", iface, visual,
++          insert_above, reference_visual);
++
++    if (!visual)
++        return E_INVALIDARG;
++
++    child_visual_impl = impl_from_IDCompositionVisual(visual);
++    if (child_visual_impl->is_root || child_visual_impl->is_child)
++        return E_INVALIDARG;
++
++    dcomp_lock();
++    if (reference_visual)
++    {
++        ref_visual_impl = impl_from_IDCompositionVisual(reference_visual);
++        if (!(ref_visual_impl->is_child && ref_visual_impl->parent == parent_visual_impl))
++        {
++            dcomp_unlock();
++            return E_INVALIDARG;
++        }
++
++        if (insert_above)
++            list_add_after(&ref_visual_impl->entry, &child_visual_impl->entry);
++        else
++            list_add_before(&ref_visual_impl->entry, &child_visual_impl->entry);
++    }
++    else
++    {
++        if (insert_above)
++            list_add_tail(&parent_visual_impl->child_visuals, &child_visual_impl->entry);
++        else
++            list_add_head(&parent_visual_impl->child_visuals, &child_visual_impl->entry);
++    }
++
++    child_visual_impl->is_child = TRUE;
++    child_visual_impl->parent = parent_visual_impl;
++    dcomp_unlock();
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE visual_RemoveVisual(IDCompositionVisualUnknown *iface,
++        IDCompositionVisual *visual)
++{
++    struct composition_visual *parent_visual_impl = impl_from_IDCompositionVisualUnknown(iface);
++    struct composition_visual *child_visual_impl;
++
++    FIXME("iface %p, visual %p.\n", iface, visual);
++
++    if (!visual)
++        return E_INVALIDARG;
++
++    child_visual_impl = impl_from_IDCompositionVisual(visual);
++    dcomp_lock();
++    if (!(child_visual_impl->is_child && child_visual_impl->parent == parent_visual_impl))
++    {
++        dcomp_unlock();
++        return E_INVALIDARG;
++    }
++
++    list_remove(&child_visual_impl->entry);
++    child_visual_impl->is_child = FALSE;
++    child_visual_impl->parent = NULL;
++    dcomp_unlock();
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE visual_RemoveAllVisuals(IDCompositionVisualUnknown *iface)
++{
++    struct composition_visual *parent_visual_impl = impl_from_IDCompositionVisualUnknown(iface);
++    struct composition_visual *child_visual_impl;
++
++    FIXME("iface %p.\n", iface);
++
++    dcomp_lock();
++    LIST_FOR_EACH_ENTRY(child_visual_impl, &parent_visual_impl->child_visuals, struct composition_visual, entry)
++    {
++        list_remove(&child_visual_impl->entry);
++        child_visual_impl->is_child = FALSE;
++        child_visual_impl->parent = NULL;
++    }
++    dcomp_unlock();
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE visual_SetCompositeMode(IDCompositionVisualUnknown *iface,
++        enum DCOMPOSITION_COMPOSITE_MODE composite_mode)
++{
++    FIXME("iface %p, composite_mode %d stub!\n", iface, composite_mode);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE visual_SetOpacityMode(IDCompositionVisualUnknown *iface,
++        enum DCOMPOSITION_OPACITY_MODE opacity_mode)
++{
++    FIXME("iface %p, opacity_mode %d stub!\n", iface, opacity_mode);
++    return E_NOTIMPL;
++}
++
++static HRESULT STDMETHODCALLTYPE visual_SetBackFaceVisibility(IDCompositionVisualUnknown *iface,
++        enum DCOMPOSITION_BACKFACE_VISIBILITY visibility)
++{
++    struct composition_visual *visual = impl_from_IDCompositionVisualUnknown(iface);
++
++    TRACE("iface %p, visibility %d.\n", iface, visibility);
++
++    if (visibility != DCOMPOSITION_BACKFACE_VISIBILITY_VISIBLE
++        && visibility != DCOMPOSITION_BACKFACE_VISIBILITY_HIDDEN
++        && visibility != DCOMPOSITION_BACKFACE_VISIBILITY_INHERIT)
++        return E_INVALIDARG;
++
++    visual->visibility = visibility;
++    return S_OK;
++}
++
++static HRESULT WINAPI visual_unknown_method1(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method2(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method3(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method4(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method5(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method6(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method7(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method8(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method9(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method10(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method11(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method12(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method13(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++/* parameter1 is from the second parameter of NtCreateCompositionInputSink() */
++static HRESULT WINAPI visual_unknown_method14(IDCompositionVisualUnknown *iface, void *parameter1)
++{
++    FIXME("iface %p parameter1 %p stub!\n", iface, parameter1);
++    return S_OK;
++}
++
++static HRESULT WINAPI visual_unknown_method15(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method16(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method17(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method18(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method19(IDCompositionVisualUnknown *iface, float parameter1)
++{
++    FIXME("iface %p parameter1 %f stub!\n", iface, parameter1);
++
++    return S_OK;
++}
++
++static HRESULT WINAPI visual_unknown_method20(IDCompositionVisualUnknown *iface, float parameter1)
++{
++    FIXME("iface %p parameter1 %f stub!\n", iface, parameter1);
++
++    return S_OK;
++}
++
++static HRESULT WINAPI visual_unknown_method21(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method22(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method23(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method24(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method25(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method26(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method27(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method28(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method29(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method30(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method31(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method32(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method33(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method34(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method35(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method36(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method37(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method38(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method39(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method40(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method41(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method42(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method43(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method44(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method45(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method46(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method47(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method48(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method49(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method50(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method51(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method52(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method53(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method54(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method55(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method56(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method57(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method58(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method59(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method60(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method61(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method62(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method63(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method64(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method65(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method66(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method67(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method68(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method69(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method70(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method71(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method72(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method73(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method74(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method75(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method76(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method77(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method78(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method79(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method80(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method81(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method82(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method83(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method84(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method85(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method86(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method87(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method88(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method89(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method90(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method91(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method92(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method93(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method94(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method95(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method96(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method97(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method98(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI visual_unknown_method99(IDCompositionVisualUnknown *iface)
++{
++    FIXME("iface %p stub!\n", iface);
++    return E_NOTIMPL;
++}
++
++static const struct IDCompositionVisualUnknownVtbl visual_unknown_vtbl =
++{
++    /* IUnknown methods */
++    visual_QueryInterface,
++    visual_AddRef,
++    visual_Release,
++    /* IDCompositionVisual methods */
++    visual_SetOffsetXAnimation,
++    visual_SetOffsetX,
++    visual_SetOffsetYAnimation,
++    visual_SetOffsetY,
++    visual_SetTransformObject,
++    visual_SetTransform,
++    visual_SetTransformParent,
++    visual_SetEffect,
++    visual_SetBitmapInterpolationMode,
++    visual_SetBorderMode,
++    visual_SetClipObject,
++    visual_SetClip,
++    visual_SetContent,
++    visual_AddVisual,
++    visual_RemoveVisual,
++    visual_RemoveAllVisuals,
++    visual_SetCompositeMode,
++    /* IDCompositionVisual2 methods */
++    visual_SetOpacityMode,
++    visual_SetBackFaceVisibility,
++    /* IDCompositionVisualUnknown methods */
++    visual_unknown_method1,
++    visual_unknown_method2,
++    visual_unknown_method3,
++    visual_unknown_method4,
++    visual_unknown_method5,
++    visual_unknown_method6,
++    visual_unknown_method7,
++    visual_unknown_method8,
++    visual_unknown_method9,
++    visual_unknown_method10,
++    visual_unknown_method11,
++    visual_unknown_method12,
++    visual_unknown_method13,
++    visual_unknown_method14,
++    visual_unknown_method15,
++    visual_unknown_method16,
++    visual_unknown_method17,
++    visual_unknown_method18,
++    visual_unknown_method19,
++    visual_unknown_method20,
++    visual_unknown_method21,
++    visual_unknown_method22,
++    visual_unknown_method23,
++    visual_unknown_method24,
++    visual_unknown_method25,
++    visual_unknown_method26,
++    visual_unknown_method27,
++    visual_unknown_method28,
++    visual_unknown_method29,
++    visual_unknown_method30,
++    visual_unknown_method31,
++    visual_unknown_method32,
++    visual_unknown_method33,
++    visual_unknown_method34,
++    visual_unknown_method35,
++    visual_unknown_method36,
++    visual_unknown_method37,
++    visual_unknown_method38,
++    visual_unknown_method39,
++    visual_unknown_method40,
++    visual_unknown_method41,
++    visual_unknown_method42,
++    visual_unknown_method43,
++    visual_unknown_method44,
++    visual_unknown_method45,
++    visual_unknown_method46,
++    visual_unknown_method47,
++    visual_unknown_method48,
++    visual_unknown_method49,
++    visual_unknown_method50,
++    visual_unknown_method51,
++    visual_unknown_method52,
++    visual_unknown_method53,
++    visual_unknown_method54,
++    visual_unknown_method55,
++    visual_unknown_method56,
++    visual_unknown_method57,
++    visual_unknown_method58,
++    visual_unknown_method59,
++    visual_unknown_method60,
++    visual_unknown_method61,
++    visual_unknown_method62,
++    visual_unknown_method63,
++    visual_unknown_method64,
++    visual_unknown_method65,
++    visual_unknown_method66,
++    visual_unknown_method67,
++    visual_unknown_method68,
++    visual_unknown_method69,
++    visual_unknown_method70,
++    visual_unknown_method71,
++    visual_unknown_method72,
++    visual_unknown_method73,
++    visual_unknown_method74,
++    visual_unknown_method75,
++    visual_unknown_method76,
++    visual_unknown_method77,
++    visual_unknown_method78,
++    visual_unknown_method79,
++    visual_unknown_method80,
++    visual_unknown_method81,
++    visual_unknown_method82,
++    visual_unknown_method83,
++    visual_unknown_method84,
++    visual_unknown_method85,
++    visual_unknown_method86,
++    visual_unknown_method87,
++    visual_unknown_method88,
++    visual_unknown_method89,
++    visual_unknown_method90,
++    visual_unknown_method91,
++    visual_unknown_method92,
++    visual_unknown_method93,
++    visual_unknown_method94,
++    visual_unknown_method95,
++    visual_unknown_method96,
++    visual_unknown_method97,
++    visual_unknown_method98,
++    visual_unknown_method99,
++};
++
++HRESULT create_visual(int version, REFIID iid, void **new_visual)
++{
++    struct composition_visual *visual;
++    HRESULT hr;
++
++    if (!new_visual)
++        return E_INVALIDARG;
++
++    visual = calloc(1, sizeof(*visual));
++    if (!visual)
++        return E_OUTOFMEMORY;
++
++    visual->IDCompositionVisualUnknown_iface.lpVtbl = &visual_unknown_vtbl;
++    visual->version = version;
++    visual->ref = 1;
++    list_init(&visual->child_visuals);
++    hr = IUnknown_QueryInterface(&visual->IDCompositionVisualUnknown_iface, iid, new_visual);
++    IUnknown_Release(&visual->IDCompositionVisualUnknown_iface);
++    return hr;
++}
++
++HRESULT create_visual_from_shared_visual_handle(HANDLE shared_visual_handle, void **new_visual)
++{
++    struct composition_visual *visual_impl;
++    HANDLE handle;
++    HRESULT hr;
++
++    if (!DuplicateHandle(GetCurrentProcess(), shared_visual_handle, GetCurrentProcess(), &handle, 0,
++                         FALSE, DUPLICATE_SAME_ACCESS))
++    {
++        ERR("Cannot duplicate handle, last error %lu.\n", GetLastError());
++        return E_FAIL;
++    }
++
++    hr = create_visual(2, &IID_IDCompositionVisual, (void **)new_visual);
++    if (FAILED(hr))
++    {
++        CloseHandle(handle);
++        return hr;
++    }
++
++    visual_impl = impl_from_IDCompositionVisualUnknown(*new_visual);
++    visual_impl->shared_visual_handle = handle;
++    return S_OK;
++}
