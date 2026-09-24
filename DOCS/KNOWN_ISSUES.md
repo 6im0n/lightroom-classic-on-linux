@@ -72,7 +72,10 @@ produces real masks.
 runtimeclasses back at wine's builtins (see #7). The launcher re-asserts all
 three on every start; re-running `install-ai-masking.sh` also fixes it.
 
-> **AI Denoise** is a different Adobe code path and has not been verified here.
+> **AI Denoise** is a different Adobe code path. It works on AMD Radeon cards on
+> the GPU path (RX 9060 XT and RX 7900 XTX, reported in #19); it hasn't been
+> tested with Intel graphics yet. Masking also runs on the GPU there, with no
+> adapter spoofing.
 
 ---
 

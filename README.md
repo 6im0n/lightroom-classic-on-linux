@@ -17,12 +17,14 @@ missing feature. See [`KNOWN_ISSUES.md`](DOCS/KNOWN_ISSUES.md).
 
 - Install from the standalone `Set-up.exe` or the Creative Cloud app
 - Library, Import, Develop and all manual edits
-- AI masking: Select Subject, Sky and Objects (CPU path)
+- AI masking: Select Subject, Sky and Objects. It runs on the CPU with Intel
+  graphics and on the GPU with AMD Radeon cards.
+- AI Denoise on AMD Radeon cards (GPU). Not tested with Intel graphics yet.
 - GPU acceleration through vkd3d-proton
 - Filled colour histogram, Export and Copy Settings dialogs
 
 HDR has not been verified: it needs the native Wayland driver (now the default
-on Wayland sessions) plus an HDR compositor. AI Denoise has not been tested.
+on Wayland sessions) plus an HDR compositor.
 
 ## Requirements
 
@@ -35,8 +37,25 @@ on Wayland sessions) plus an HDR compositor. AI Denoise has not been tested.
 - A valid Lightroom Classic license
 - About 10 GB of free disk space
 
-Tested on Arch Linux with GNOME (Wayland), wine 11.12 staging, DXVK 2.7.1,
-vkd3d-proton 3.0.0 and an Intel Iris Xe GPU. NVIDIA and AMD should work too.
+### Tested setups
+
+| | Intel | AMD |
+|---|---|---|
+| Distro / desktop | Arch Linux, GNOME (Wayland) | Fedora 44, GNOME 50.4 (Wayland) |
+| Wine | 11.18 staging | 11.17 staging (Kron4ek build) |
+| DXVK / vkd3d-proton | 3.1 / 3.0.0 | 3.1 / 3.0.1 |
+| GPU | Intel Iris Xe | Radeon RX 9060 XT and RX 7900 XTX (Mesa 26.1, RADV) |
+| Lightroom Classic | 15.5 | 15.3 |
+| AI masking | CPU | GPU, about 1.4 s per mask |
+| AI Denoise, 26.6 MP raw | not tested | 18.4 s (RX 9060 XT), 8.4 s (RX 7900 XTX) |
+
+On AMD, Lightroom reports full GPU acceleration without any adapter spoofing.
+The AMD results come from a user report (#19). NVIDIA hasn't been tested, but
+DXVK and vkd3d-proton support it.
+
+With several GPUs, pick the one Lightroom uses with Mesa's device selector, for
+example `MESA_VK_DEVICE_SELECT=1002:744c!` for a card with PCI ID `1002:744c`
+(`vulkaninfo --summary` lists them).
 
 ## Install
 
