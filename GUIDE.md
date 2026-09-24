@@ -60,7 +60,7 @@ running them in the right order.
    4) via Creative Cloud — offline ACCCx.zip        → resources/scripts/creative-cloud/install-creative-cloud.sh (§5)
    5) via standalone Set-up.exe                     → resources/scripts/lightroom/install-lightroom-classic.sh (§5)
    6) Post-install fixes                            → resources/scripts/lightroom/install-lightroom-classic-fixes.sh (§6)
-   a) Enable AI masking (needs mingw-w64 + gcc)     → resources/scripts/lightroom/install-ai-masking.sh (§6b)
+   a) Enable AI masking                             → resources/scripts/lightroom/install-ai-masking.sh (§6b)
   --- run ---
    7) Run Lightroom Classic                         → resources/scripts/lightroom/run-lightroom-classic.sh (§8)
    8) Run Lightroom Classic — virtual desktop       → same, with --vdesktop (§9, Import fallback)
@@ -147,9 +147,15 @@ For GPU acceleration (section 7) you'll also need a source of **vkd3d-proton**:
 either `winetricks vkd3d`, or a Proton / GE-Proton runner that bundles it. More
 in section 7.
 
-Keep **both** compilers from the lists above: `mingw-w64` builds the Windows-side
-stubs (`hnetcfg`, the dialog-repaint proxy, the WinRT stream DLL) and native
-`gcc` builds the Linux-side `fakeram.so` used by AI masking (section 6b).
+`cabextract` is required: winetricks uses it for the fonts, and `setup.sh` stops
+right away with a clear message if it or `winetricks` is missing.
+
+The compilers are optional. Every helper binary ships prebuilt in
+`resources/stubs/binaries/`, and the scripts use those unless a source file was
+edited after its binary was built. Keep `mingw-w64` (Windows-side stubs:
+`hnetcfg`, the dialog-repaint proxy, the WinRT stream DLL) and native `gcc`
+(the Linux-side `fakeram.so`, section 6b) if you want to rebuild them. Without
+a compiler, the scripts say so and keep the shipped binary.
 
 ---
 
@@ -370,7 +376,14 @@ What the script does, and **why** each fix is needed:
    version"* → *"System Requirements check failed."* Win11 clears it. (You can
    read the installer's own check in `HDInstaller.log`, decoded as UTF-16LE.)
 3. **Ensures Microsoft Edge WebView2 is installed** (the Adobe installer engine
-   needs it; the script downloads and silently installs it if missing).
+   needs it). By default the script downloads Microsoft's small online
+   bootstrapper, which fetches the runtime during the install. For an offline
+   install, put Microsoft's standalone runtime installer
+   (`MicrosoftEdgeWebView2RuntimeInstallerX64.exe`, about 200 MB, "Evergreen
+   Standalone Installer, x64" on
+   <https://developer.microsoft.com/microsoft-edge/webview2/>) in
+   `resources/installers/` and it's used instead. The CC scripts share the same
+   helper, `resources/scripts/wine/install-webview2.sh`.
 4. **Launches the installer with `winegstreamer` disabled**
    (`WINEDLLOVERRIDES="winegstreamer="`). The installer's embedded Gecko/xul UI
    tries to init audio on startup: `l3codecx.ax` → `winegstreamer` →
@@ -487,8 +500,8 @@ These can only run *after* Classic is on disk. The script:
    app dir (plus `version_orig.dll`, a copy of wine's builtin it forwards to),
    scoped to `Lightroom.exe` via a per-app DllOverride. It fixes the blank Copy
    Settings panel and the ghost rows in the Export preset tree; see
-   `resources/stubs/sources/fix_ghost.c`. Build it first with
-   `resources/scripts/stubs/build-stubs.sh` if the binary is missing.
+   `resources/stubs/sources/fix_ghost.c`. The binary ships prebuilt;
+   `resources/scripts/stubs/build-stubs.sh` rebuilds it if you edit the source.
 
 Re-run this script after a **wine upgrade**: step 5 re-copies `version_orig.dll`
 from the wine you now have (KNOWN_ISSUES #7).
@@ -518,7 +531,7 @@ tries to take all of it and OOMs (or freezes your desktop).
 
 **What the script does:**
 
-1. **Builds `winrt_inmemstream.dll`** (mingw-w64, from
+1. **Installs `winrt_inmemstream.dll`** (built with mingw-w64 from
    `resources/stubs/sources/winrt_inmemstream.c`) — an in-process WinRT DLL
    implementing `InMemoryRandomAccessStream`, `DataWriter` and
    `RandomAccessStreamReference`, **with `IAsyncInfo` on its async results**, and
@@ -526,12 +539,20 @@ tries to take all of it and OOMs (or freezes your desktop).
    Installs it into `system32`.
 2. **Registers the three runtimeclasses** against it under
    `HKLM\Software\Microsoft\WindowsRuntime\ActivatableClassId`.
-3. **Builds `fakeram.so`** (native gcc, from
+3. **Provides `fakeram.so`** (built with native gcc from
    `resources/stubs/sources/fakeram.c`) — an `LD_PRELOAD` shim that caps the RAM
    wine sees (`sysinfo` + `/proc/meminfo`) so the arena stays bounded. The
    launcher loads it automatically.
 4. **Removes the AMD GPU spoof** from `dxvk.conf` if an earlier run left it
    there — see the warning in section 7.
+
+Both binaries ship prebuilt, so no compiler is needed. The script rebuilds one
+only when its source is newer, or when you run it with `MASKING_REBUILD=1`.
+Rebuilding `winrt_inmemstream.dll` needs complete WinRT headers: Fedora's
+`mingw64-headers` ships a stale `windows.storage.streams.idl`. Point `WINE_INC`
+at the headers from WineHQ's `wine-staging-devel` package (default
+`/opt/wine-staging/include/wine/windows`). On Fedora you can unpack them from
+the RPM without installing it: `rpm2cpio wine-staging-devel-*.rpm | cpio -idm`.
 
 Then launch normally and try **Develop > Masking > Select Subject**. Inference
 runs on the **CPU** (Lightroom routes Intel parts to CPU), so expect it to take

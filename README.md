@@ -28,7 +28,9 @@ setup crashes Lightroom. AI Denoise has not been tested.
 
 - 64-bit Linux with working Vulkan drivers (`vulkan-tools`)
 - Wine 11.8 staging or newer
-- `winetricks`, `mingw-w64` and `gcc`
+- `winetricks` and `cabextract`
+- `mingw-w64` and `gcc`, only if you want to rebuild the helper DLLs (prebuilt
+  ones ship in the repo)
 - vkd3d-proton (`winetricks vkd3d` or a Proton / GE-Proton runner)
 - A valid Lightroom Classic license
 - About 10 GB of free disk space
