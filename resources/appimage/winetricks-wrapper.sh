@@ -66,10 +66,14 @@ for p in $(printf '%s\n' "${pinned[@]+"${pinned[@]}"}" | sort -u); do
       override_native "$@"
       echo "$DXVK_VERSION" > "$PREFIX/.appimage-dxvk" ;;
     vkd3d)
-      echo "==> Installing pinned vkd3d-proton $VKD3D_PROTON_VERSION (AppImage bundle)"
+      # 64-bit only, like install-vkd3d-proton.sh. Lightroom is 64-bit; the
+      # 32-bit processes that probe D3D12 must keep wine's builtin: Adobe
+      # Desktop Service (32-bit) dies on 32-bit vkd3d-proton while running
+      # Camera Raw's compatibility check, and the Creative Cloud Apps tab
+      # then never loads (so CoreSync is never installed).
+      echo "==> Installing pinned vkd3d-proton $VKD3D_PROTON_VERSION (AppImage bundle, 64-bit)"
       set -- d3d12 d3d12core
       install_dlls "$DEPS/vkd3d-proton/x64" "$SYS32" "$@"
-      install_dlls "$DEPS/vkd3d-proton/x86" "$SYSWOW64" "$@"
       override_native "$@"
       echo "$VKD3D_PROTON_VERSION" > "$PREFIX/.appimage-vkd3d-proton" ;;
   esac

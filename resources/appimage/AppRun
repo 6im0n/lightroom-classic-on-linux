@@ -104,42 +104,64 @@ stage_home() {
 # ---------------------------------------------------------------------------
 # Prefix upkeep
 # ---------------------------------------------------------------------------
-# First boot of a new prefix, before setup.sh gets to it: with mscoree/mshtml
-# disabled so the bundled wine (which ships no Mono/Gecko) doesn't pop its
-# "download Mono / Gecko" dialogs. Mono is never needed (setup installs
-# dotnet48) and setup.sh installs the pinned Gecko itself. setup.sh then sees
-# an existing prefix and skips its own wineboot.
+# First boot of a new prefix, before setup.sh gets to it: with mscoree
+# disabled so the bundled wine (which ships no Mono) doesn't offer to download
+# it. Mono is never needed: setup.sh installs dotnet48. Gecko is found in
+# <wine>/share/wine/gecko (fetch-deps.sh puts the pinned MSIs there), so it
+# installs silently. setup.sh then sees an existing prefix and skips its own
+# wineboot.
+# mshtml must NOT be disabled here: wineboot registers it, and without that
+# the about:/res:/javascript: protocol handlers are missing. Adobe Desktop
+# Service then crashes in mshtml while running Camera Raw's compatibility
+# check, the Creative Cloud Apps tab never loads, and CoreSync is never
+# installed.
 init_prefix() {
   [ -f "$PREFIX/system.reg" ] && return 0
   echo "==> Creating the wine prefix in $PREFIX"
   mkdir -p "$PREFIX"
-  WINEDEBUG=-all WINEDLLOVERRIDES="mscoree,mshtml=" "$WINE" wineboot --init
+  WINEDEBUG=-all WINEDLLOVERRIDES="mscoree=" "$WINE" wineboot --init
   "$WINESERVER" -w
+  touch "$PREFIX/.appimage-mshtml-ok"
+}
+
+# Prefixes made by earlier builds of this AppImage booted with mshtml disabled
+# (see init_prefix): register it once, both arches.
+fix_mshtml_registration() {
+  [ -f "$PREFIX/.appimage-mshtml-ok" ] && return 0
+  echo "==> Registering mshtml in the prefix (one-time fix)"
+  WINEDEBUG=-all "$WINE" regsvr32 /s mshtml.dll || true
+  WINEDEBUG=-all "$WINE" 'C:\windows\syswow64\regsvr32.exe' /s mshtml.dll || true
+  touch "$PREFIX/.appimage-mshtml-ok"
 }
 
 # After an AppImage update that changes the pinned DXVK / vkd3d-proton, put the
 # new version in the prefix — only where it was installed in the first place.
 # Decided from the DLL files, not the registry (user.reg is only flushed when
 # wineserver exits): a DLL without wine's "Wine builtin DLL" marker is DXVK /
-# vkd3d-proton, and if it (or its 32-bit twin) differs from the pinned one it
-# is reinstalled. This also completes install-vkd3d-proton.sh, which copies
-# only the 64-bit vkd3d-proton DLLs.
+# vkd3d-proton, and if it differs from the pinned one it is reinstalled.
 is_foreign_dll() {
   [ -f "$1" ] && ! head -c 128 "$1" | grep -qa 'Wine builtin DLL'
 }
 
 sync_pinned_gpu() {
-  local w="$PREFIX/drive_c/windows"
+  local w="$PREFIX/drive_c/windows" d
   if is_foreign_dll "$w/system32/d3d11.dll" &&
      ! { cmp -s "$w/system32/d3d11.dll" "$DEPS/dxvk/x64/d3d11.dll" &&
          cmp -s "$w/syswow64/d3d11.dll" "$DEPS/dxvk/x32/d3d11.dll"; }; then
     WINEDEBUG=-all "$WINETRICKS" -q dxvk
   fi
   if is_foreign_dll "$w/system32/d3d12core.dll" &&
-     ! { cmp -s "$w/system32/d3d12core.dll" "$DEPS/vkd3d-proton/x64/d3d12core.dll" &&
-         cmp -s "$w/syswow64/d3d12core.dll" "$DEPS/vkd3d-proton/x86/d3d12core.dll"; }; then
+     ! cmp -s "$w/system32/d3d12core.dll" "$DEPS/vkd3d-proton/x64/d3d12core.dll"; then
     WINEDEBUG=-all "$WINETRICKS" -q vkd3d
   fi
+  # vkd3d-proton is 64-bit only (see winetricks-wrapper.sh): 32-bit Adobe
+  # Desktop Service dies on the 32-bit one. Earlier builds of this AppImage
+  # installed it in syswow64; put wine's builtin back.
+  for d in d3d12 d3d12core; do
+    if is_foreign_dll "$w/syswow64/$d.dll"; then
+      cp -f "$DEPS/wine/lib/wine/i386-windows/$d.dll" "$w/syswow64/$d.dll"
+    fi
+  done
 }
 
 # The dialog-repaint proxy version.dll forwards to version_orig.dll, a copy of
@@ -282,6 +304,7 @@ stage_home
 fix_desktop_entry
 install_menu_entry
 if [ -f "$PREFIX/system.reg" ]; then
+  fix_mshtml_registration
   sync_pinned_gpu
   sync_version_orig
 fi

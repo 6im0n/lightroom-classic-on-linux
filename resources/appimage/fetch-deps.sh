@@ -83,6 +83,12 @@ echo "==> Wine Gecko $GECKO_VERSION"
 rm -rf "$OUT/gecko"; mkdir -p "$OUT/gecko"
 cp "$(download "$GECKO_X86_64_URL" "$GECKO_X86_64_SHA256")" "$OUT/gecko/"
 cp "$(download "$GECKO_X86_URL" "$GECKO_X86_SHA256")" "$OUT/gecko/"
+# Also where wine itself looks for Gecko (<wine>/share/wine/gecko), so the
+# first wineboot installs it silently instead of offering to download it.
+mkdir -p "$OUT/wine/share/wine/gecko"
+for msi in "$OUT"/gecko/*.msi; do
+  ln -sf "../../../../gecko/${msi##*/}" "$OUT/wine/share/wine/gecko/${msi##*/}"
+done
 
 cp "$LOCK" "$OUT/deps.lock"
 
