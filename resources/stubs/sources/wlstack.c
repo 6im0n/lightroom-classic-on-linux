@@ -38,8 +38,6 @@
 #include <unistd.h>
 #include <wayland-client-core.h>
 #include <wayland-util.h>
-#include <wayland-client-protocol.h>
-#include <dlfcn.h>
 
 #define WL_SUBCOMPOSITOR_GET_SUBSURFACE 1
 #define WL_SUBSURFACE_DESTROY           0
@@ -117,69 +115,6 @@ static int parse_args(const char *sig, va_list ap, union wl_argument *args)
         n++;
     }
     return n;
-}
-
-/* ---- optional: hide the compositor's text-input (IME) global ------------
- *
- * WLSTACK_HIDE_TEXT_INPUT=1 filters zwp_text_input_manager_v3 out of every
- * wl_registry listener, so wine runs as on a compositor without host input
- * methods (it only logs that they "won't work"). */
-
-struct registry_hook
-{
-    struct wl_proxy *registry;
-    const struct wl_registry_listener *listener;
-    void *data;
-};
-
-#define MAX_REGISTRIES 64
-static struct registry_hook hooks[MAX_REGISTRIES];
-static int hook_count;
-
-static void hook_global(void *data, struct wl_registry *registry, uint32_t name,
-                        const char *interface, uint32_t version)
-{
-    struct registry_hook *hook = data;
-
-    if (!strcmp(interface, "zwp_text_input_manager_v3")) return;
-    if (hook->listener->global)
-        hook->listener->global(hook->data, registry, name, interface, version);
-}
-
-static void hook_global_remove(void *data, struct wl_registry *registry, uint32_t name)
-{
-    struct registry_hook *hook = data;
-
-    if (hook->listener->global_remove)
-        hook->listener->global_remove(hook->data, registry, name);
-}
-
-static const struct wl_registry_listener hook_listener = { hook_global, hook_global_remove };
-
-typedef int (*add_listener_fn)(struct wl_proxy *, void (**)(void), void *);
-
-int wl_proxy_add_listener(struct wl_proxy *proxy, void (**implementation)(void), void *data)
-{
-    static add_listener_fn real;
-    const char *hide = getenv("WLSTACK_HIDE_TEXT_INPUT");
-    struct registry_hook *hook = NULL;
-
-    if (!real) real = (add_listener_fn)dlsym(RTLD_NEXT, "wl_proxy_add_listener");
-
-    if (hide && *hide == '1' && !strcmp(wl_proxy_get_class(proxy), "wl_registry"))
-    {
-        pthread_mutex_lock(&lock);
-        if (hook_count < MAX_REGISTRIES)
-        {
-            hook = &hooks[hook_count++];
-            hook->registry = proxy;
-            hook->listener = (const struct wl_registry_listener *)implementation;
-            hook->data = data;
-        }
-        pthread_mutex_unlock(&lock);
-        if (hook) return real(proxy, (void (**)(void))&hook_listener, hook);
-    }
-    return real(proxy, implementation, data);
 }
 
 struct wl_proxy *wl_proxy_marshal_flags(struct wl_proxy *proxy, uint32_t opcode,
