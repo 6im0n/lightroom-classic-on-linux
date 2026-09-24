@@ -45,6 +45,16 @@ no()   { printf '%s' "${R}${CROSS}${Z}"; }   # red cross
 # ---------------------------------------------------------------------------
 detect() {
   HAVE_WINE=0;   command -v "$WINE" >/dev/null 2>&1 && HAVE_WINE=1
+  # wine version, e.g. "wine-11.12 (Staging)". Cached: it doesn't change while
+  # the menu runs. WINE_OK=1 when it's >= 11.8 (the minimum we support).
+  if [ "$HAVE_WINE" = 1 ] && [ -z "${WINE_VER:-}" ]; then
+    WINE_VER=$("$WINE" --version 2>/dev/null)
+    WINE_OK=0
+    if [[ $WINE_VER =~ wine-([0-9]+)\.([0-9]+) ]]; then
+      local maj=${BASH_REMATCH[1]} min=${BASH_REMATCH[2]}
+      { [ "$maj" -gt 11 ] || { [ "$maj" -eq 11 ] && [ "$min" -ge 8 ]; }; } && WINE_OK=1
+    fi
+  fi
   PREFIX_READY=0
   [ -f "$PREFIX/system.reg" ] && [ -f "$PREFIX/.setup-verbs-done" ] && PREFIX_READY=1
   # vkd3d-proton is "done" only when its native d3d12 DLL override is set
@@ -104,8 +114,12 @@ banner() {
   if [ "$HAVE_WINE" = 0 ]; then
     echo "  ${R}wine not found in PATH${Z} — install wine (>= 11.8 staging) first."
     echo
+  else
+    printf '  %b  %s' "$(flag "$WINE_OK")" "${WINE_VER:-wine (unknown version)}"
+    [ "$WINE_OK" = 1 ] || printf "  ${R}(need >= 11.8 staging)${Z}"
+    echo
   fi
-  printf '  %b  wine prefix prepared\n'        "$(flag "$PREFIX_READY")"
+  printf '  %b  wine prefix prepared\n'      "$(flag "$PREFIX_READY")"
   printf '  %b  GPU acceleration (vkd3d)\n'     "$(flag "$GPU_DONE")"
   printf '  %b  Creative Cloud app installed\n' "$(flag "$CC_INSTALLED")"
   printf '  %b  Lightroom Classic installed\n'  "$(flag "$LR_INSTALLED")"
