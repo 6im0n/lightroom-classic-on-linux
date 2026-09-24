@@ -1,0 +1,60 @@
+# deps.lock — dependencies pinned into the AppImage (read by fetch-deps.sh
+# and build-appimage.sh).
+#
+# Only the AppImage uses these. Running the repo scripts directly keeps using
+# the wine / winetricks on your PATH, as before.
+#
+# Every download is checked against its sha256; a mismatch aborts the build.
+# To upgrade a dependency: test the new version, then bump VERSION + URL +
+# SHA256 together here.
+#
+# These are the versions the fixes in this repo were verified against —
+# several fixes depend on them (DXVK 3.1 buffer leak → WebView2 on wined3d,
+# staging 11.11+ dcomp change, wine upgrades rewriting WinRT registry keys).
+
+# Wine — Kron4ek portable build, staging, pure WoW64 (no 32-bit host libs).
+WINE_VERSION=11.18-staging
+WINE_URL=https://github.com/Kron4ek/Wine-Builds/releases/download/11.18/wine-11.18-staging-amd64-wow64.tar.xz
+WINE_SHA256=15f312effe798838d4877a37126509618b3f98759744b37aeda0c6f55875d99a
+
+# DXVK (D3D8-11 -> Vulkan).
+DXVK_VERSION=3.1.1
+DXVK_URL=https://github.com/doitsujin/dxvk/releases/download/v3.1.1/dxvk-3.1.1.tar.gz
+DXVK_SHA256=40565b4a724aadc4433fa4e010b4b23916d9b1f1baeee64e17186db94f54e608
+
+# vkd3d-proton (D3D12 -> Vulkan; lets Lightroom see the real GPU).
+VKD3D_PROTON_VERSION=3.0.1
+VKD3D_PROTON_URL=https://github.com/HansKristian-Work/vkd3d-proton/releases/download/v3.0.1/vkd3d-proton-3.0.1.tar.zst
+VKD3D_PROTON_SHA256=3cf2315522af5e43605ef6d3c41dad91387040bf97199934f3f7ab76caaa2f0c
+
+# winetricks — pinned by commit (tag 20260125). Pinning winetricks also pins
+# the redistributables it installs (dotnet48, vcrun2019, …): it checks each
+# download against the sha256 hardcoded in this exact revision.
+WINETRICKS_VERSION=20260125
+WINETRICKS_URL=https://raw.githubusercontent.com/Winetricks/winetricks/b76e1ee79ac57d7aceb384f74518fc423265810c/src/winetricks
+WINETRICKS_SHA256=431f82fc74000e6c864409f1d8fb495d696c03928808e3e8acffc45179312a7b
+
+# Wine Gecko (MSHTML) — the version wine 11.18 asks for (dlls/appwiz.cpl/addons.c).
+GECKO_VERSION=2.47.4
+GECKO_X86_64_URL=https://dl.winehq.org/wine/wine-gecko/2.47.4/wine-gecko-2.47.4-x86_64.msi
+GECKO_X86_64_SHA256=e590b7d988a32d6aa4cf1d8aa3aa3d33766fdd4cf4c89c2dcc2095ecb28d066f
+GECKO_X86_URL=https://dl.winehq.org/wine/wine-gecko/2.47.4/wine-gecko-2.47.4-x86.msi
+GECKO_X86_SHA256=26cecc47706b091908f7f814bddb074c61beb8063318e9efc5a7f789857793d6
+
+# ---------------------------------------------------------------------------
+# Build tools (used by build-appimage.sh, not bundled)
+# ---------------------------------------------------------------------------
+APPIMAGETOOL_VERSION=1.9.1
+APPIMAGETOOL_URL=https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+APPIMAGETOOL_SHA256=ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+
+# The AppImage runtime (the ELF header that mounts the SquashFS). Passed to
+# appimagetool explicitly, otherwise it downloads the latest "continuous" one.
+RUNTIME_VERSION=20251108
+RUNTIME_URL=https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
+RUNTIME_SHA256=2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
+
+# Not pinned, on purpose:
+#   wine-mono     — never installed: `winetricks dotnet48` replaces it.
+#   WebView2      — Evergreen runtime; Adobe's apps expect the evergreen channel.
+#   Creative Cloud — Adobe only serves the latest bootstrapper.
