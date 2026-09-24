@@ -628,6 +628,12 @@ The launcher is self-contained and configurable via env vars:
   shutdown (`KERNEL32.dll.UnregisterApplicationRecoveryCallback`, KNOWN_ISSUES
   #5) and leaves processes holding locks that deadlock the next launch. Set
   `0` only to attach a debugger to a running instance.
+- **`LR_KILL_ON_EXIT`** (default `1`) — once Lightroom exits, stop the prefix's
+  wine session (`wineserver -k`, then wait for it). Otherwise wineserver,
+  services.exe, rpcss, plugplay, lsass and WebView2's `MicrosoftEdgeUpdate.exe`
+  keep running until the next launch. It's skipped while the Creative Cloud app
+  (`Creative Cloud.exe`) is running in the same prefix. Set `0` to leave the
+  session up.
 - **`LR_SCREEN_DEPTH`** (default `32`) — writes
   `HKCU\Software\Wine\AppDefaults\Lightroom.exe\X11 Driver\ScreenDepth`. Pins
   wine to Xwayland's depth-32 ARGB visual so opening **Import** doesn't abort

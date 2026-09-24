@@ -190,6 +190,12 @@ running processes are affected — the install, settings and shader cache on dis
 are untouched, and Lightroom is single-instance anyway. Set `LR_KILL_STALE=0` to
 skip it (e.g. to attach a debugger to a running instance).
 
+The launcher also stops the session after Lightroom exits (`LR_KILL_ON_EXIT`,
+on by default, skipped while the Creative Cloud app is running), so nothing is
+left running between launches. With the current Lightroom Classic on wine
+11.18, a normal close shuts down cleanly in about 15 seconds and never reaches
+the aborting import; the pre-launch cleanup stays as a safety net.
+
 By hand, or for the Creative Cloud app (`start.sh` option `k`):
 
 ```bash

@@ -255,10 +255,38 @@ fi
 # Merge with any caller-supplied WINEDLLOVERRIDES.
 export WINEDLLOVERRIDES="discburning=;${WINEDLLOVERRIDES:-}"
 
+# ---------------------------------------------------------------------------
+# Stop the prefix's wine session once Lightroom exits.
+#
+# Without this, wineserver, services.exe, rpcss, plugplay, lsass and the
+# MicrosoftEdgeUpdate.exe that WebView2 spawns keep running after Lightroom
+# closes, until the next launch clears them. Lightroom's own shutdown takes
+# ~15 s after its window disappears; wine returns once it's done.
+#
+# The Creative Cloud app shares this prefix, so the session is left alone while
+# "Creative Cloud.exe" is running. LR_KILL_ON_EXIT=0 always leaves it running.
+# ---------------------------------------------------------------------------
+LR_KILL_ON_EXIT="${LR_KILL_ON_EXIT:-1}"
+
+set +e
 if [ "$LR_VDESKTOP" = off ]; then
-  exec "${WINE:-wine}" "$LR_EXE" "$@"
+  "${WINE:-wine}" "$LR_EXE" "$@"
 else
   echo "==> virtual desktop: $LR_VDESKTOP (fallback; raise LR_DPI if the UI looks tiny)"
-  exec "${WINE:-wine}" explorer "/desktop=lrc,$LR_VDESKTOP" "$LR_EXE" "$@"
+  "${WINE:-wine}" explorer "/desktop=lrc,$LR_VDESKTOP" "$LR_EXE" "$@"
 fi
+rc=$?
+set -e
+
+if [ "$LR_KILL_ON_EXIT" = 0 ]; then
+  exit "$rc"
+fi
+if pgrep -f 'Creative Cloud\.exe' >/dev/null 2>&1; then
+  echo "==> Lightroom closed; Creative Cloud is still running, leaving the wine session up"
+  exit "$rc"
+fi
+echo "==> Lightroom closed; stopping the wine session"
+wineserver -k >/dev/null 2>&1 || true
+timeout 20 wineserver -w >/dev/null 2>&1 || true
+exit "$rc"
 
