@@ -72,7 +72,10 @@ produces real masks.
 runtimeclasses back at wine's builtins (see #7). The launcher re-asserts all
 three on every start; re-running `install-ai-masking.sh` also fixes it.
 
-> **AI Denoise** is a different Adobe code path and has not been verified here.
+> **AI Denoise** is a different Adobe code path. It works on AMD Radeon cards on
+> the GPU path (RX 9060 XT and RX 7900 XTX, reported in #19); it hasn't been
+> tested with Intel graphics yet. Masking also runs on the GPU there, with no
+> adapter spoofing.
 
 ---
 
@@ -495,6 +498,28 @@ yet, so it may not be specific to Wayland.
 Avoid the Map module for now. To hide it from the module bar, right-click the
 module names (Library, Develop, Map…) and untick Map. If Lightroom freezes
 there, use `start.sh` option `k` to stop the wine session.
+
+## 14. Device-limit window is blank with the Wayland driver (open)
+
+When your Adobe plan already has the maximum number of computers signed in,
+Lightroom opens a window asking which computer to sign out. With the Wayland
+driver that window stays **blank**, so you can't pick one and Lightroom can't
+be activated. It's drawn by Adobe's licensing helper
+(`Adobe Desktop Common\NGL\adobe_licensing_wf_helper.exe`), a separate
+Chromium process with its own GPU process. That GPU process doesn't crash.
+Giving the helper wined3d and the WebView2 `dcomp.dll` (like the Creative
+Cloud sign-in fix, #10) doesn't help.
+
+**Workaround:** start Lightroom once with the X11 driver, where the window
+shows normally, pick the computer to sign out, then switch back:
+
+```bash
+LR_DRIVER=x11 resources/scripts/lightroom/run-lightroom-classic.sh
+# AppImage: LR_DRIVER=x11 ./Lightroom_Classic_on_Linux-*.AppImage
+```
+
+or `start.sh` option `w` → `x11` (saved until you change it back). You can
+also sign out the other computer from your Adobe account page first.
 
 ---
 

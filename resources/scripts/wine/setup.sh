@@ -18,7 +18,7 @@
 #      hnetcfg.dll in system32/, and registers the DllOverride.
 #   7. Installs the patched d2d1.dll and mfplat.dll if present in resources/stubs/.
 #
-# Prereqs (see GUIDE.md section 1):
+# Prereqs (see DOCS/GUIDE.md section 1):
 #   wine 11.8 staging or newer, winetricks 20240105+, cabextract, curl.
 #   mingw-w64 is only needed to rebuild the stub DLLs; prebuilt ones ship in
 #   resources/stubs/binaries/.
@@ -46,7 +46,7 @@ for tool in "$WINE" "$WINETRICKS" cabextract curl; do
 done
 if [ "${#missing[@]}" -gt 0 ]; then
   echo "ERROR: missing required tools: ${missing[*]}" >&2
-  echo "  Install them with your package manager (GUIDE.md section 1 lists the" >&2
+  echo "  Install them with your package manager (DOCS/GUIDE.md section 1 lists the" >&2
   echo "  package names per distro), then re-run this script." >&2
   exit 1
 fi

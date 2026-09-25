@@ -30,3 +30,6 @@ __pycache__/
 
 # GE-Proton variant prefix
 wineprefix-proton/
+
+# AppImage build output (resources/appimage/build-appimage.sh)
+build/

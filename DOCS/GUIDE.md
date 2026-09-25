@@ -931,6 +931,12 @@ the proxy `version.dll` that `install-lightroom-classic-fixes.sh` installs into
 Lightroom's app dir (KNOWN_ISSUES #6). Re-run that script if the dialogs start
 ghosting again — e.g. after a wine upgrade left `version_orig.dll` stale.
 
+### "Sign out of another computer" window is blank
+
+Adobe's device-limit window stays empty with the Wayland driver. Start
+Lightroom once with `LR_DRIVER=x11` (or `start.sh` option `w` → `x11`), pick
+the computer to sign out, then switch back (KNOWN_ISSUES #14).
+
 ### Export window freezes the whole app
 
 wine's `discburning.dll` (IMAPI2) blocks the main UI thread while LR enumerates

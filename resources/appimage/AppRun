@@ -1,0 +1,327 @@
+#!/usr/bin/env bash
+# AppRun — entry point of the Lightroom Classic on Linux AppImage.
+#
+# AppDir layout (built by the AppImage build script):
+#   AppRun                   this file
+#   app/                     the repo: start.sh, resources/{scripts,stubs,patches}, DOCS/
+#   deps/                    pinned wine, DXVK, vkd3d-proton, winetricks, gecko (fetch-deps.sh)
+#   usr/bin/winetricks       winetricks-wrapper.sh (pins the dxvk / vkd3d verbs)
+#
+# The AppImage is read-only and mounted at a random /tmp/.mount_* path on every
+# run, but the repo scripts write next to themselves (wineprefix/, logs/,
+# resources/installers/, resources/stubs/binaries/). So the scripts are copied
+# to a writable home, LR_HOME (default ~/.local/share/lightroom-classic-on-linux),
+# and run from there: the prefix lives at $LR_HOME/wineprefix, a stable path.
+# The copy is refreshed whenever the AppImage changes; the prefix, installers
+# and logs in LR_HOME are never touched by that.
+#
+# Every script runs with the bundled wine first in PATH and WINE / WINESERVER
+# / WINETRICKS pointing into the bundle, so nothing uses the distro's wine.
+
+set -euo pipefail
+
+APPDIR=${APPDIR:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")}
+export APPDIR
+DEPS="$APPDIR/deps"
+LR_HOME=${LR_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/lightroom-classic-on-linux}
+PREFIX="$LR_HOME/wineprefix"
+S="$LR_HOME/resources/scripts"
+# How to start this AppImage again (for the desktop entry / a terminal window).
+SELF=${APPIMAGE:-$APPDIR/AppRun}
+
+# shellcheck source=deps.lock
+. "$DEPS/deps.lock"
+
+usage() {
+  cat <<EOF
+Lightroom Classic on Linux — AppImage
+
+usage: ${SELF##*/} [command] [args]
+
+  (no command)      run Lightroom Classic if installed, else open the setup menu
+  --menu            open the setup menu (start.sh), in a terminal if needed
+  --cc              run the Creative Cloud desktop app
+  --kill            stop every wine process in the prefix (wineserver -k)
+  --wine ARGS       run the bundled wine in the prefix (e.g. --wine winecfg)
+  --winetricks ARGS run the bundled winetricks in the prefix
+  --shell [ARGS]    bash with the bundle's environment (debugging)
+  --versions        show the pinned dependency versions
+  --remove-menu-entry  remove the app-menu entry this AppImage adds
+  --help            this help
+
+Any other arguments go to run-lightroom-classic.sh, e.g. --dpi=144, --vdesktop.
+
+Data lives in $LR_HOME (prefix, installers, logs). Set LR_HOME to move it.
+Each start adds/refreshes an app-menu entry; LR_NO_MENU_ENTRY=1 skips that.
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Environment: bundled wine + winetricks wrapper first
+# ---------------------------------------------------------------------------
+setup_env() {
+  export PATH="$APPDIR/usr/bin:$DEPS/wine/bin:$PATH"
+  export WINE="$DEPS/wine/bin/wine"
+  export WINESERVER="$DEPS/wine/bin/wineserver"
+  export WINETRICKS="$APPDIR/usr/bin/winetricks"
+  export WINEPREFIX="$PREFIX"
+  export WINEARCH=win64
+  # install-vkd3d-proton.sh prefers a Bottles GE-Proton runner over winetricks;
+  # point it at the pinned vkd3d-proton so a host runner can never win.
+  export VKD3D_SRC="$DEPS/vkd3d-proton/x64"
+}
+
+# ---------------------------------------------------------------------------
+# Writable copy of the scripts in LR_HOME
+# ---------------------------------------------------------------------------
+bundle_id() {
+  if [ -f "$APPDIR/bundle-id" ]; then cat "$APPDIR/bundle-id"
+  else (cd "$APPDIR/app" && find . -type f -print0 | sort -z | xargs -0 cat | sha256sum | cut -d' ' -f1)
+  fi
+}
+
+stage_home() {
+  local id; id=$(bundle_id)
+  [ "$(cat "$LR_HOME/.bundle-id" 2>/dev/null)" = "$id" ] && return 0
+  echo "==> Preparing $LR_HOME"
+  mkdir -p "$LR_HOME/resources/installers" "$LR_HOME/logs"
+  # Code only: replaced wholesale. User data (wineprefix/, installers/, logs/)
+  # is never in this list.
+  for p in resources/scripts resources/stubs resources/patches DOCS; do
+    rm -rf "${LR_HOME:?}/$p"
+    cp -a "$APPDIR/app/$p" "$LR_HOME/$p"
+  done
+  for f in start.sh README.md LICENSE; do
+    [ -f "$APPDIR/app/$f" ] && cp -a "$APPDIR/app/$f" "$LR_HOME/$f"
+  done
+  # setup.sh installs Wine Gecko from resources/installers/gecko/ and only
+  # downloads the MSIs when missing: hand it the pinned ones.
+  mkdir -p "$LR_HOME/resources/installers/gecko"
+  cp -n "$DEPS"/gecko/*.msi "$LR_HOME/resources/installers/gecko/" 2>/dev/null || true
+  echo "$id" > "$LR_HOME/.bundle-id"
+}
+
+# ---------------------------------------------------------------------------
+# Prefix upkeep
+# ---------------------------------------------------------------------------
+# First boot of a new prefix, before setup.sh gets to it: with mscoree
+# disabled so the bundled wine (which ships no Mono) doesn't offer to download
+# it. Mono is never needed: setup.sh installs dotnet48. Gecko is found in
+# <wine>/share/wine/gecko (fetch-deps.sh puts the pinned MSIs there), so it
+# installs silently. setup.sh then sees an existing prefix and skips its own
+# wineboot.
+# mshtml must NOT be disabled here: wineboot registers it, and without that
+# the about:/res:/javascript: protocol handlers are missing. Adobe Desktop
+# Service then crashes in mshtml while running Camera Raw's compatibility
+# check, the Creative Cloud Apps tab never loads, and CoreSync is never
+# installed.
+init_prefix() {
+  [ -f "$PREFIX/system.reg" ] && return 0
+  echo "==> Creating the wine prefix in $PREFIX"
+  mkdir -p "$PREFIX"
+  WINEDEBUG=-all WINEDLLOVERRIDES="mscoree=" "$WINE" wineboot --init
+  "$WINESERVER" -w
+  touch "$PREFIX/.appimage-mshtml-ok"
+}
+
+# Prefixes made by earlier builds of this AppImage booted with mshtml disabled
+# (see init_prefix): register it once, both arches.
+fix_mshtml_registration() {
+  [ -f "$PREFIX/.appimage-mshtml-ok" ] && return 0
+  echo "==> Registering mshtml in the prefix (one-time fix)"
+  WINEDEBUG=-all "$WINE" regsvr32 /s mshtml.dll || true
+  WINEDEBUG=-all "$WINE" 'C:\windows\syswow64\regsvr32.exe' /s mshtml.dll || true
+  touch "$PREFIX/.appimage-mshtml-ok"
+}
+
+# After an AppImage update that changes the pinned DXVK / vkd3d-proton, put the
+# new version in the prefix — only where it was installed in the first place.
+# Decided from the DLL files, not the registry (user.reg is only flushed when
+# wineserver exits): a DLL without wine's "Wine builtin DLL" marker is DXVK /
+# vkd3d-proton, and if it differs from the pinned one it is reinstalled.
+is_foreign_dll() {
+  [ -f "$1" ] && ! head -c 128 "$1" | grep -qa 'Wine builtin DLL'
+}
+
+sync_pinned_gpu() {
+  local w="$PREFIX/drive_c/windows" d
+  if is_foreign_dll "$w/system32/d3d11.dll" &&
+     ! { cmp -s "$w/system32/d3d11.dll" "$DEPS/dxvk/x64/d3d11.dll" &&
+         cmp -s "$w/syswow64/d3d11.dll" "$DEPS/dxvk/x32/d3d11.dll"; }; then
+    WINEDEBUG=-all "$WINETRICKS" -q dxvk
+  fi
+  if is_foreign_dll "$w/system32/d3d12core.dll" &&
+     ! cmp -s "$w/system32/d3d12core.dll" "$DEPS/vkd3d-proton/x64/d3d12core.dll"; then
+    WINEDEBUG=-all "$WINETRICKS" -q vkd3d
+  fi
+  # vkd3d-proton is 64-bit only (see winetricks-wrapper.sh): 32-bit Adobe
+  # Desktop Service dies on the 32-bit one. Earlier builds of this AppImage
+  # installed it in syswow64; put wine's builtin back.
+  for d in d3d12 d3d12core; do
+    if is_foreign_dll "$w/syswow64/$d.dll"; then
+      cp -f "$DEPS/wine/lib/wine/i386-windows/$d.dll" "$w/syswow64/$d.dll"
+    fi
+  done
+}
+
+# The dialog-repaint proxy version.dll forwards to version_orig.dll, a copy of
+# wine's builtin made by install-lightroom-classic-fixes.sh. When the bundled
+# wine changes, refresh that copy so it matches the wine actually running.
+sync_version_orig() {
+  local orig="$PREFIX/drive_c/Program Files/Adobe/Adobe Lightroom Classic/version_orig.dll"
+  local builtin="$DEPS/wine/lib/wine/x86_64-windows/version.dll"
+  [ -f "$orig" ] && [ -f "$builtin" ] || return 0
+  cmp -s "$orig" "$builtin" || cp -f "$builtin" "$orig"
+}
+
+# install-desktop-entry.sh (start.sh option g) writes Exec= with the path of
+# the run script in LR_HOME. Started from the menu that would run without the
+# bundle's environment, i.e. with the distro's wine. Point it at this AppImage
+# instead, keeping its flags. Re-done on every start, so it follows the
+# AppImage file if it is moved.
+fix_desktop_entry() {
+  local f="${XDG_DATA_HOME:-$HOME/.local/share}/applications/adobe-lightroom-classic.desktop"
+  local run="$S/lightroom/run-lightroom-classic.sh"
+  [ -f "$f" ] || return 0
+  local exec_line args
+  exec_line=$(grep -m1 '^Exec=' "$f") || return 0
+  case "$exec_line" in
+    "Exec=$run"*)   args=${exec_line#"Exec=$run"} ;;
+    "Exec=\"$SELF\""*) args=${exec_line#"Exec=\"$SELF\""} ;;
+    *) grep -q "^X-AppImage-Launcher=true" "$f" || return 0
+       args=${exec_line#Exec=\"*\"} ;;
+  esac
+  local want="Exec=\"$SELF\"$args"
+  [ "$exec_line" = "$want" ] && return 0
+  sed -i "s|^Exec=.*|$(printf '%s' "$want" | sed 's/[&|\\]/\\&/g')|" "$f"
+  grep -q '^X-AppImage-Launcher=true' "$f" || echo 'X-AppImage-Launcher=true' >> "$f"
+}
+
+# Application-menu entry for the AppImage itself, with its icon: file managers
+# like GNOME Files don't show icons embedded in an AppImage, so without this
+# it has no menu entry and a generic icon. Opens Lightroom (or the setup menu
+# before Lightroom is installed); right-click offers the setup menu. Rewritten
+# only when something changed, e.g. the AppImage file was moved.
+# LR_NO_MENU_ENTRY=1 skips it; --remove-menu-entry deletes it.
+MENU_ID=lightroom-classic-on-linux
+MENU_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/applications/$MENU_ID.desktop"
+MENU_ICON="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/512x512/apps/$MENU_ID.png"
+
+install_menu_entry() {
+  [ "${LR_NO_MENU_ENTRY:-0}" = 1 ] && return 0
+  local changed=0 entry
+  if ! cmp -s "$APPDIR/$MENU_ID.png" "$MENU_ICON"; then
+    mkdir -p "$(dirname "$MENU_ICON")"
+    cp -f "$APPDIR/$MENU_ID.png" "$MENU_ICON"
+    changed=1
+  fi
+  entry=$(cat <<EOF
+[Desktop Entry]
+Type=Application
+Name=Lightroom Classic on Linux
+Comment=Run Adobe Lightroom Classic under a pinned wine
+Exec="$SELF"
+Icon=$MENU_ID
+Terminal=false
+Categories=Graphics;Photography;
+StartupWMClass=lightroom.exe
+Actions=menu;
+X-AppImage-Launcher=true
+
+[Desktop Action menu]
+Name=Setup menu
+Exec="$SELF" --menu
+EOF
+)
+  if [ "$(cat "$MENU_FILE" 2>/dev/null)" != "$entry" ]; then
+    mkdir -p "$(dirname "$MENU_FILE")"
+    printf '%s\n' "$entry" > "$MENU_FILE"
+    changed=1
+  fi
+  [ "$changed" = 1 ] || return 0
+  command -v update-desktop-database >/dev/null 2>&1 &&
+    update-desktop-database "$(dirname "$MENU_FILE")" 2>/dev/null || true
+  command -v gtk-update-icon-cache >/dev/null 2>&1 &&
+    gtk-update-icon-cache -q -t -f "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor" 2>/dev/null || true
+}
+
+lr_installed() {
+  [ -f "$PREFIX/drive_c/Program Files/Adobe/Adobe Lightroom Classic/Lightroom.exe" ]
+}
+
+# ---------------------------------------------------------------------------
+# The setup menu needs a terminal. Started from a file manager / launcher
+# there is none, so open one running this AppImage again with --menu.
+# ---------------------------------------------------------------------------
+open_terminal() {
+  local t
+  for t in ${TERMINAL:-} kgx ptyxis gnome-terminal konsole xfce4-terminal \
+           alacritty kitty foot wezterm x-terminal-emulator xterm; do
+    command -v "$t" >/dev/null 2>&1 || continue
+    case "${t##*/}" in
+      kgx|ptyxis|gnome-terminal) exec "$t" -- "$SELF" --menu ;;
+      xfce4-terminal)            exec "$t" -x "$SELF" --menu ;;
+      kitty|foot)                exec "$t" "$SELF" --menu ;;
+      wezterm)                   exec "$t" start -- "$SELF" --menu ;;
+      *)                         exec "$t" -e "$SELF" --menu ;;
+    esac
+  done
+  echo "ERROR: no terminal emulator found. Run '$SELF --menu' from a terminal." >&2
+  exit 1
+}
+
+run_menu() {
+  if [ ! -t 0 ] || [ ! -t 1 ]; then open_terminal; fi
+  init_prefix
+  # start.sh loops until the user quits; fix the desktop entry it may have
+  # written (option g) once it returns.
+  local rc=0
+  "$LR_HOME/start.sh" "$@" || rc=$?
+  fix_desktop_entry
+  return "$rc"
+}
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+case "${1:-}" in
+  --help|-h) usage; exit 0 ;;
+  --versions)
+    echo "wine          $WINE_VERSION  ($("$DEPS/wine/bin/wine" --version 2>/dev/null || echo '?'))"
+    echo "DXVK          $DXVK_VERSION"
+    echo "vkd3d-proton  $VKD3D_PROTON_VERSION"
+    echo "winetricks    $WINETRICKS_VERSION"
+    echo "Wine Gecko    $GECKO_VERSION"
+    echo "data          $LR_HOME"
+    exit 0 ;;
+  --remove-menu-entry)
+    rm -f "$MENU_FILE" "$MENU_ICON" && echo "removed $MENU_FILE"
+    exit 0 ;;
+esac
+
+setup_env
+stage_home
+fix_desktop_entry
+install_menu_entry
+if [ -f "$PREFIX/system.reg" ]; then
+  fix_mshtml_registration
+  sync_pinned_gpu
+  sync_version_orig
+fi
+
+cmd=${1:-}
+[ $# -gt 0 ] && case "$cmd" in --menu|--cc|--kill|--wine|--winetricks|--shell) shift ;; esac
+
+case "$cmd" in
+  --menu)       run_menu "$@" ;;
+  --cc)         exec "$S/creative-cloud/run-creative-cloud.sh" "$@" ;;
+  --kill)       "$WINESERVER" -k 2>/dev/null || true ;;
+  --wine)       init_prefix; exec "$WINE" "$@" ;;
+  --winetricks) init_prefix; exec "$WINETRICKS" "$@" ;;
+  --shell)      cd "$LR_HOME"; exec bash "$@" ;;
+  *)
+    if lr_installed; then
+      exec "$S/lightroom/run-lightroom-classic.sh" "$@"
+    fi
+    run_menu ;;
+esac
