@@ -479,6 +479,16 @@ a separate top-level window under Wayland, which is why, when a walkthrough
 did show, clicks stayed blocked after it closed. The "What's New" screen can't
 be turned off this way: Lightroom resets `shouldShowWhatsNew` itself.
 
+Distorted window (fixed): with two monitors, a laptop panel at 125% below an
+external one, Lightroom once opened stretched: title bar and menus several
+times too tall, squeezed horizontally. Its preferences held a main-window
+position saved on the panel (`mainWindowY = 1504`, 2894×1634). Under Wayland
+wine can't place windows, so restoring that position left Lightroom's window
+out of step with where the compositor showed it, and the driver stretched the
+content. Deleting the saved position fixed it. The launcher now removes
+Lightroom's saved window position and size before each Wayland launch
+(`LR_KEEP_WINDOW=1` keeps them), so Lightroom opens at its default size.
+
 Two things the launcher handles for Wayland: switching drivers restarts the
 wine session, and wine's desktop process is started before Lightroom, because
 Lightroom's first processes otherwise race to start it and one fails with

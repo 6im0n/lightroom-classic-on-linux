@@ -649,6 +649,13 @@ The launcher is self-contained and configurable via env vars:
   goes through Xwayland on a Wayland session. Without
   `LR_DRIVER`, the choice saved with `start.sh` option `w` is used. Switching
   drivers restarts the wine session automatically.
+- **`LR_KEEP_WINDOW`** (default `0`) — with the Wayland driver, the launcher
+  removes Lightroom's saved main-window position and size before each launch
+  (`mainWindowX/Y/Width/Height`, `AgMainFramePlacement_*` in the preferences
+  file). The compositor places windows under Wayland, and a restored position
+  can open Lightroom stretched and distorted (KNOWN_ISSUES #12). Lightroom
+  then opens at its default size. Set `1` to keep the saved window. X11 always
+  keeps it.
 - **`LR_KILL_STALE`** (default `1`) — run `wineserver -k` for the prefix before
   launching and wait for the processes to be reaped. Lightroom aborts on
   shutdown (`KERNEL32.dll.UnregisterApplicationRecoveryCallback`, KNOWN_ISSUES

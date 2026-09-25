@@ -162,6 +162,24 @@ if [ "$(cat "$_driver_mark" 2>/dev/null)" != "$LR_DRIVER" ]; then
 fi
 echo "$LR_DRIVER" > "$_driver_mark"
 
+# Wayland: drop Lightroom's saved main-window position and size. Under
+# winewayland the compositor places windows, so a saved position means
+# nothing, and restoring one can distort the whole window: with a laptop panel
+# (125%) below an external monitor, a position saved on the panel (y=1504)
+# made Lightroom open squeezed to a strip that the driver then stretched over
+# the full height (menus and title bar several times too tall). Without the
+# entries Lightroom opens at its default size. X11 honours positions, so it
+# keeps them. LR_KEEP_WINDOW=1 skips this.
+if [ "$LR_DRIVER" = wayland ] && [ "${LR_KEEP_WINDOW:-0}" != 1 ]; then
+  for _prefs in "$PREFIX"/drive_c/users/*/AppData/Roaming/Adobe/Lightroom/Preferences/"Lightroom Classic CC 7 Preferences.agprefs"; do
+    [ -f "$_prefs" ] || continue
+    if grep -qE '^[[:space:]]*(mainWindow(X|Y|Width|Height)|AgMainFramePlacement_[A-Za-z_]+) = ' "$_prefs"; then
+      sed -i -E '/^[[:space:]]*(mainWindow(X|Y|Width|Height)|AgMainFramePlacement_[A-Za-z_]+) = /d' "$_prefs"
+      echo "==> reset Lightroom's saved window position (Wayland; LR_KEEP_WINDOW=1 keeps it)"
+    fi
+  done
+fi
+
 # Start wine's desktop process (explorer) before Lightroom does. On a fresh
 # session Lightroom starts several processes at once; under winewayland two of
 # them can race to start the desktop and one fails with "The explorer process
