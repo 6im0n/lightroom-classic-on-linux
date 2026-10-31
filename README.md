@@ -125,7 +125,7 @@ keeps your install.
 - `winrt_inmemstream.dll` and `fakeram.so` make AI masking work.
 - A proxy `version.dll` fixes dialog repaint glitches.
 - With the native Wayland driver, a small preload (`wlstack.so`) keeps menus
-  above the GPU-drawn photo.
+  above the GPU-drawn photo and avoids a dark UI on KDE + NVIDIA.
 - A `dcomp.dll` built from wine-staging 11.10, used only by Edge WebView2,
   stops the Creative Cloud sign-in page from crash-looping and filling RAM.
   WebView2 also renders through wined3d instead of DXVK (DXVK 3.1 leaked GPU
