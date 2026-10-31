@@ -533,6 +533,23 @@ also sign out the other computer from your Adobe account page first.
 
 ---
 
+## 15. Dark, unreadable UI on KDE Plasma + NVIDIA with the Wayland driver (FIXED)
+
+**Symptom:** with `LR_DRIVER=wayland` on KDE Plasma 6.8 and an NVIDIA GPU, panels
+and text render dark or black and are unreadable. The same happens to any wine
+window: Notepad's white page is black. `LR_DRIVER=x11` is not affected.
+
+**Cause:** `winewayland.drv` sends window contents as XRGB8888 `wl_shm` buffers.
+The X byte must be ignored, but on this setup it is treated as alpha, and GDI
+leaves it at 0, so those pixels become transparent black. A small native Wayland
+client shows the same result, so wine is not the cause. Whether the fault is in
+KWin or the NVIDIA GLES driver has not been established.
+
+**Fix:** `wlstack.so` sets the X byte to `0xff` when a buffer is attached. It
+costs about 2 ms per 4K frame on a Core i5-11400F. `LR_WL_NO_XFIX=1` turns it off.
+
+**Tested on:** CachyOS, KDE Plasma 6.8.0, RTX 3080, NVIDIA 615.78.08.
+
 ## What works
 
 For contrast — verified working under the tested environment:

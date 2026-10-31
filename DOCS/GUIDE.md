@@ -645,7 +645,9 @@ The launcher is self-contained and configurable via env vars:
   one and why. Wayland is smoother and handles fractional scaling itself, which
   also avoids the Preferences freeze X11 hits at 125%/150% scaling
   (KNOWN_ISSUES #12). With it the launcher also preloads `wlstack.so`, which
-  keeps menus above the GPU-drawn photo (`LR_WLSTACK=0` turns it off). `x11`
+  keeps menus above the GPU-drawn photo and avoids a dark UI on KDE + NVIDIA
+  (KNOWN_ISSUES #15; `LR_WLSTACK=0` turns it off, `LR_WL_NO_XFIX=1` turns off
+  only the second fix). `x11`
   goes through Xwayland on a Wayland session. Without
   `LR_DRIVER`, the choice saved with `start.sh` option `w` is used. Switching
   drivers restarts the wine session automatically.
